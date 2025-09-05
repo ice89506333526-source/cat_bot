@@ -1,3 +1,4 @@
 aiogram==2.25.1
+aiohttp==3.12.15
 yookassa==3.7.0
-aiohttp==3.8.5
+requests==2.32.5
