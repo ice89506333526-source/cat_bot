@@ -1,0 +1,34 @@
+{
+  "5794375382": {
+    "tariff": "pro",
+    "posts_today": 1,
+    "last_post_day": 5,
+    "history": [
+      {
+        "type": "text",
+        "text": "вв"
+      },
+      {
+        "type": "text",
+        "text": "12"
+      }
+    ],
+    "email": "sankrist@yandex.ru",
+    "payments": [
+      {
+        "tariff": "pro",
+        "date": "2025-09-05T14:32:46.929499",
+        "provider_payment_charge_id": "304d0842-000f-5000-b000-13831d1783a0"
+      }
+    ]
+  },
+  "827299190": {
+    "tariff": "premium",
+    "posts_today": 0,
+    "last_post_day": null,
+    "history": [],
+    "email": null,
+    "pending_tariff": null,
+    "payments": []
+  }
+}

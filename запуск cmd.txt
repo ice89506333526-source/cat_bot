@@ -1,0 +1,7 @@
+D:
+
+cd \distr\cat_bot
+
+venv\Scripts\activate
+
+python bot.py
