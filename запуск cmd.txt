@@ -5,3 +5,6 @@ cd \distr\cat_bot
 venv\Scripts\activate
 
 python bot.py
+
+
+git remote add origin https://github.com/ice89506333526-source/cat_bot.git

@@ -1,0 +1,546 @@
+# bot.py — Telegram bot: публикации в группу, тарифы, история, оплата с фискализацией (ЮKassa)
+# Поместите этот файл в папку проекта, активируйте venv и запустите: python bot.py
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime
+from typing import Dict, Any, List
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import LabeledPrice, PreCheckoutQuery
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.utils import executor
+
+# ------------------ Константы (вставлены ваши данные) ------------------
+API_TOKEN = "8423035573:AAHo53sPuZJXbGXLhW5-EThbdXM5GrCULDQ"
+BOT_USERNAME = "cat777_cash_bot"
+GROUP_ID = -1002522022019  # -1002522022019
+ADMIN_ID = 827299190
+# Provider token для Telegram Payments (токен магазина, который выдаёт BotFather при подключении ЮKassa)
+PROVIDER_TOKEN = "390540012:LIVE:77400"
+
+# Доп. (для справки) Yookassa shop и secret (не используются напрямую для send_invoice)
+YOOKASSA_SHOP_ID = "1151636"
+YOOKASSA_SECRET_KEY = "live_9WZWrOx1vsciG0JzhQqb8fP_JdPwvLJ3YSJBbc1acBE"
+
+USERS_FILE = "users_data.json"
+
+# ------------------ Тарифы ------------------
+TARIFFS = {
+    "free": {"price": 0, "posts_per_day": 1, "pin_limit": 0, "delay": False},
+    "pro": {"price": 200, "posts_per_day": 3, "pin_limit": 2, "delay": True},
+    "premium": {"price": 1000, "posts_per_day": 15, "pin_limit": 5, "delay": True},
+}
+
+# ------------------ Логирование ------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ------------------ Загрузка/сохранение пользователей ------------------
+def load_users() -> Dict[str, Any]:
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {str(k): v for k, v in data.items()}
+        except Exception:
+            logger.exception("Не удалось загрузить users_data.json — начнем с пустых данных")
+            return {}
+    return {}
+
+def save_users(data: Dict[str, Any]) -> None:
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("Ошибка при сохранении users_data.json")
+
+users_data: Dict[str, Any] = load_users()
+
+# ------------------ Инициализация пользователя ------------------
+def init_user(user_id: int) -> Dict[str, Any]:
+    key = str(user_id)
+    if key not in users_data:
+        users_data[key] = {
+            "tariff": "free",
+            "posts_today": 0,
+            "last_post_day": None,
+            "history": [],  # список последних постов (будем хранить максимум 5)
+            "email": None,
+            "pending_tariff": None,
+            "payments": []
+        }
+        save_users(users_data)
+    # админ — вечный премиум (перезаписать тариф, если нужно)
+    if key == str(ADMIN_ID):
+        users_data[key]["tariff"] = "premium"
+        save_users(users_data)
+    return users_data[key]
+
+# инициализируем администратора, если не был
+init_user(ADMIN_ID)
+
+# ------------------ FSM ------------------
+class States(StatesGroup):
+    waiting_for_post = State()
+    waiting_for_schedule_time = State()
+    waiting_for_email_for_payment = State()
+    waiting_for_edit_index = State()
+
+# ------------------ Бот ------------------
+bot = Bot(token=API_TOKEN, parse_mode=types.ParseMode.HTML)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
+
+# ------------------ Планировщик отложенных постов (в память) ------------------
+scheduled_posts: List[Dict[str, Any]] = []  # каждый элемент: {"time": datetime, "post": post_dict, "user_id": user_id}
+
+async def scheduled_post_worker():
+    while True:
+        now = datetime.now()
+        # копируем, чтобы безопасно итерировать
+        for task in scheduled_posts[:]:
+            if task["time"] <= now:
+                await send_post_to_group(task["post"])
+                # обновляем историю/лимит
+                ukey = str(task["user_id"])
+                init_user(task["user_id"])
+                users_data[ukey]["history"].append(task["post"])
+                users_data[ukey]["posts_today"] = users_data[ukey].get("posts_today", 0) + 1
+                # trim history to last 5
+                if len(users_data[ukey]["history"]) > 5:
+                    users_data[ukey]["history"] = users_data[ukey]["history"][-5:]
+                save_users(users_data)
+                scheduled_posts.remove(task)
+        await asyncio.sleep(15)
+
+# ------------------ Kлавиатуры ------------------
+def main_menu_kb() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("📢 Создать пост", callback_data="create_post"),
+        types.InlineKeyboardButton("💳 Сменить тариф", callback_data="change_tariff"),
+        types.InlineKeyboardButton("📜 Мои посты", callback_data="my_posts"),
+    )
+    return kb
+
+def publish_choice_kb() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        types.InlineKeyboardButton("📌 Сразу публиковать", callback_data="publish_now"),
+        types.InlineKeyboardButton("⏰ Отложить публикацию", callback_data="schedule_post")
+    )
+    return kb
+
+def make_tariff_kb(user_tariff: str) -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for name, info in TARIFFS.items():
+        if name == "free":
+            continue
+        label = f"{name.capitalize()} — {info['price']}₽/мес, {info['posts_per_day']} постов/день"
+        if name == user_tariff:
+            label += " (текущий)"
+        kb.add(types.InlineKeyboardButton(label, callback_data=f"pay:{name}"))
+    return kb
+
+# ------------------ Помощники ------------------
+async def send_post_to_group(post: Dict[str, Any]) -> None:
+    try:
+        if post["type"] == "text":
+            await bot.send_message(GROUP_ID, post["text"])
+        elif post["type"] == "photo":
+            await bot.send_photo(GROUP_ID, post["file_id"], caption=post.get("caption"))
+        elif post["type"] == "video":
+            await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption"))
+    except Exception:
+        logger.exception("Ошибка при отправке поста в группу")
+
+# ------------------ Хендлеры ------------------
+
+@dp.message_handler(commands=["start"])
+async def on_start(message: types.Message):
+    # если команда в группе — просто ссылка на личку
+    if message.chat.type != types.ChatType.PRIVATE:
+        await message.reply(f"Публикация постов ЗДЕСЬ — перейдите в личку: @{BOT_USERNAME}")
+        return
+
+    # в личке — инициализация и меню
+    init_user(message.from_user.id)
+    await message.answer("Привет! Выберите действие:", reply_markup=main_menu_kb())
+
+# Обработчик кнопок: Создать пост
+@dp.callback_query_handler(lambda c: c.data == "create_post")
+async def cb_create_post(callback: types.CallbackQuery):
+    await callback.answer()
+    user = init_user(callback.from_user.id)
+    today = datetime.now().day
+    if user.get("last_post_day") != today:
+        user["posts_today"] = 0
+        user["last_post_day"] = today
+        save_users(users_data)
+    tariff = TARIFFS[user["tariff"]]
+    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
+        # перенаправляем на смену тарифа
+        await callback.message.answer(
+            f"⚠️ Лимит публикаций исчерпан для тарифа {user['tariff'].capitalize()}. Выберите тариф:",
+            reply_markup=make_tariff_kb(user["tariff"])
+        )
+        return
+    await callback.message.answer("Отправь текст, фото или видео для публикации.", reply_markup=None)
+    await States.waiting_for_post.set()
+
+# Сменить тариф — показать варианты
+@dp.callback_query_handler(lambda c: c.data == "change_tariff")
+async def cb_change_tariff(callback: types.CallbackQuery):
+    await callback.answer()
+    user = init_user(callback.from_user.id)
+    kb = make_tariff_kb(user["tariff"])
+    await callback.message.answer(f"Текущий тариф: {user['tariff'].capitalize()}\nВыберите тариф для оплаты:", reply_markup=kb)
+
+# Обработка нажатия pay:<tariff>
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("pay:"))
+async def cb_pay(callback: types.CallbackQuery):
+    await callback.answer()
+    user = init_user(callback.from_user.id)
+    _, tariff_name = callback.data.split(":", 1)
+    if tariff_name not in TARIFFS or tariff_name == "free":
+        await callback.message.answer("Недоступный тариф.")
+        return
+
+    # если нет email или телефона — попросим email (минимально)
+    if not user.get("email"):
+        users_data[str(callback.from_user.id)]["pending_tariff"] = tariff_name
+        save_users(users_data)
+        await callback.message.answer("Для формирования чека необходим email. Пожалуйста, пришлите ваш email.")
+        await States.waiting_for_email_for_payment.set()
+        return
+
+    # если email есть — формируем provider_data и отправляем invoice
+    await send_invoice_for_tariff(callback.from_user.id, tariff_name)
+
+# Промежуточный: запрос email -> отправка invoice
+@dp.message_handler(state=States.waiting_for_email_for_payment, content_types=types.ContentTypes.TEXT)
+async def email_for_payment_handler(message: types.Message, state: FSMContext):
+    email = message.text.strip()
+    # простая валидация
+    if "@" not in email or "." not in email:
+        await message.reply("Пожалуйста, введите корректный email (пример: example@mail.ru).")
+        return
+    key = str(message.from_user.id)
+    init_user(message.from_user.id)
+    users_data[key]["email"] = email
+    pending = users_data[key].get("pending_tariff")
+    save_users(users_data)
+    await message.reply(f"Email {email} сохранён. Формирую счёт...")
+    if pending:
+        await send_invoice_for_tariff(message.from_user.id, pending)
+        users_data[key]["pending_tariff"] = None
+        save_users(users_data)
+    await state.finish()
+
+# Формирование и отправка счета (с provider_data для ЮKassa)
+async def send_invoice_for_tariff(user_id: int, tariff_name: str):
+    user = init_user(user_id)
+    tariff = TARIFFS[tariff_name]
+    price = tariff["price"]
+    # Формируем provider_data.receipt
+    receipt = {
+        "customer": {},
+        "items": [
+            {
+                "description": f"Тариф {tariff_name.capitalize()}",
+                "quantity": 1,
+                "amount": {"value": f"{price:.2f}", "currency": "RUB"},
+                "vat_code": 1,
+                "payment_mode": "full_payment",
+                "payment_subject": "service"
+            }
+        ],
+        "tax_system_code": 1
+    }
+    # добавим email или (если понадобится) phone
+    if user.get("email"):
+        receipt["customer"]["email"] = user["email"]
+    # provider_data должен быть строкой JSON
+    provider_data = {"receipt": receipt}
+
+    payload = f"tariff:{tariff_name}:{user_id}"  # уникальный payload
+    try:
+        await bot.send_invoice(
+            chat_id=user_id,
+            title=f"Оплата тарифа {tariff_name.capitalize()}",
+            description=f"Тариф {tariff_name.capitalize()} — {tariff['posts_per_day']} постов/день",
+            payload=payload,
+            provider_token=PROVIDER_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(label=f"{tariff_name.capitalize()} тариф", amount=int(price * 100))],
+            need_email=True,
+            provider_data=json.dumps(provider_data)
+        )
+    except Exception:
+        logger.exception("Ошибка при отправке invoice")
+        try:
+            await bot.send_message(user_id, "Не удалось создать счёт. Попробуйте позже.")
+        except Exception:
+            pass
+
+# PreCheckoutQuery — отвечаем Telegram что всё ок
+@dp.pre_checkout_query_handler(lambda query: True)
+async def precheckout_handler(pre_checkout_q: PreCheckoutQuery):
+    try:
+        await bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
+    except Exception:
+        logger.exception("Ошибка при answer_pre_checkout_query")
+
+# Successful payment
+@dp.message_handler(content_types=types.ContentType.SUCCESSFUL_PAYMENT)
+async def successful_payment_handler(message: types.Message):
+    try:
+        payload = message.successful_payment.invoice_payload  # формат: tariff:<name>:<user_id>
+        parts = payload.split(":")
+        if len(parts) != 3 or parts[0] != "tariff":
+            logger.warning("Некорректный payload в успешной оплате: %s", payload)
+            await message.answer("Оплата прошла, но payload некорректен. Обратитесь к администратору.")
+            return
+        tariff_name = parts[1]
+        user_id = int(parts[2])
+        key = str(user_id)
+        init_user(user_id)
+        users_data[key]["tariff"] = tariff_name
+        users_data[key]["posts_today"] = 0
+        # сохраняем provider_payment_charge_id (номер транзакции в провайдере)
+        charge_id = getattr(message.successful_payment, "provider_payment_charge_id", None)
+        if charge_id:
+            users_data[key].setdefault("payments", []).append({
+                "tariff": tariff_name,
+                "date": datetime.utcnow().isoformat(),
+                "provider_payment_charge_id": charge_id
+            })
+        save_users(users_data)
+        await message.answer(f"✅ Оплата прошла успешно — тариф {tariff_name.capitalize()} активирован!", reply_markup=main_menu_kb())
+    except Exception:
+        logger.exception("Ошибка при обработке успешной оплаты")
+        await message.answer("Платёж прошёл, но произошла ошибка при обработке. Свяжитесь с администратором.")
+
+# Просмотр истории (кнопка 'Мои посты')
+@dp.callback_query_handler(lambda c: c.data == "my_posts")
+async def cb_my_posts(callback: types.CallbackQuery):
+    await callback.answer()
+    user = init_user(callback.from_user.id)
+    hist = user.get("history", [])
+    if not hist:
+        await callback.message.answer("История пока пуста.", reply_markup=main_menu_kb())
+        return
+    # показываем последние до 5
+    for idx, p in enumerate(hist[-5:][::-1]):  # показываем в обратном порядке: от новейшего к старому
+        index_real = len(hist) - 1 - idx  # индекс в оригинальном списке
+        if p["type"] == "text":
+            preview = p["text"][:1000]
+            await callback.message.answer(preview, reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+                types.InlineKeyboardButton(f"🔁 Опубликовать", callback_data=f"repost:{index_real}"),
+                types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{index_real}")
+            ))
+        elif p["type"] == "photo":
+            preview = p.get("caption", "")
+            await callback.message.answer(preview, reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+                types.InlineKeyboardButton(f"🔁 Опубликовать", callback_data=f"repost:{index_real}"),
+                types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{index_real}")
+            ))
+        elif p["type"] == "video":
+            preview = p.get("caption", "")
+            await callback.message.answer(preview, reply_markup=types.InlineKeyboardMarkup(row_width=2).add(
+                types.InlineKeyboardButton(f"🔁 Опубликовать", callback_data=f"repost:{index_real}"),
+                types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{index_real}")
+            ))
+
+# Повторная публикация (repost:<idx>) — проверка лимита
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("repost:"))
+async def cb_repost(callback: types.CallbackQuery):
+    await callback.answer()
+    _, idx_str = callback.data.split(":", 1)
+    try:
+        idx = int(idx_str)
+    except ValueError:
+        await callback.message.answer("Неверный индекс поста.")
+        return
+    user = init_user(callback.from_user.id)
+    hist = user.get("history", [])
+    if idx < 0 or idx >= len(hist):
+        await callback.message.answer("Пост не найден.")
+        return
+
+    today = datetime.now().day
+    if user.get("last_post_day") != today:
+        user["posts_today"] = 0
+        user["last_post_day"] = today
+
+    tariff = TARIFFS[user["tariff"]]
+    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
+        await callback.message.answer("⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.", reply_markup=make_tariff_kb(user["tariff"]))
+        return
+
+    post = hist[idx]
+    await send_post_to_group(post)
+    user["posts_today"] = user.get("posts_today", 0) + 1
+    save_users(users_data)
+    await callback.message.answer("✅ Пост опубликован повторно!", reply_markup=main_menu_kb())
+
+# Редактирование поста (простой поток: пользователь отправляет новый контент; заменяем запись в истории)
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("edit:"))
+async def cb_edit(callback: types.CallbackQuery):
+    await callback.answer()
+    _, idx_str = callback.data.split(":", 1)
+    try:
+        idx = int(idx_str)
+    except ValueError:
+        await callback.message.answer("Неверный индекс для редактирования.")
+        return
+    key = str(callback.from_user.id)
+    init_user(callback.from_user.id)
+    hist = users_data[key].get("history", [])
+    if idx < 0 or idx >= len(hist):
+        await callback.message.answer("Пост не найден.")
+        return
+    # сохраним индекс в state
+    await callback.message.answer("Отправьте новый текст/фото/видео для замены этого поста.")
+    # записываем индекс в временном месте (в памяти) — сохраним в users_data, но без перманентного поля
+    users_data[key]["_editing_index"] = idx
+    save_users(users_data)
+    await States.waiting_for_edit_index.set()
+
+@dp.message_handler(state=States.waiting_for_edit_index, content_types=types.ContentTypes.ANY)
+async def handle_edit_submission(message: types.Message, state: FSMContext):
+    key = str(message.from_user.id)
+    init_user(message.from_user.id)
+    idx = users_data[key].get("_editing_index")
+    if idx is None:
+        await message.reply("Нет открытого редактирования.")
+        await state.finish()
+        return
+    # формируем новый пост
+    if message.content_type == "text":
+        new_post = {"type": "text", "text": message.text}
+    elif message.content_type == "photo":
+        new_post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption}
+    elif message.content_type == "video":
+        new_post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption}
+    else:
+        await message.reply("Тип контента не поддерживается для редактирования.")
+        await state.finish()
+        return
+    hist = users_data[key].get("history", [])
+    if 0 <= idx < len(hist):
+        hist[idx] = new_post
+        # trim to 5 if needed
+        if len(hist) > 5:
+            users_data[key]["history"] = hist[-5:]
+        save_users(users_data)
+        await message.reply("✅ Пост обновлён.", reply_markup=main_menu_kb())
+    else:
+        await message.reply("Ошибка: сохранённый индекс недействителен.")
+    users_data[key].pop("_editing_index", None)
+    save_users(users_data)
+    await state.finish()
+
+# Получение поста после нажатия 'Создать пост'
+@dp.message_handler(state=States.waiting_for_post, content_types=types.ContentTypes.ANY)
+async def handle_new_post(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    init_user(uid)
+    post = {}
+    if message.content_type == "text":
+        post = {"type": "text", "text": message.text}
+    elif message.content_type == "photo":
+        post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption}
+    elif message.content_type == "video":
+        post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption}
+    else:
+        await message.answer("Этот тип контента пока не поддерживается.")
+        await state.finish()
+        return
+
+    # сохраняем временно в state
+    await state.update_data(post_content=post)
+    # отправляем кнопки: сразу / отложить
+    await message.answer("Выбери действие для публикации:", reply_markup=publish_choice_kb())
+
+# Callback publish_now / schedule_post
+@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state="*")
+async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    post = data.get("post_content")
+    if not post:
+        await callback.message.answer("Нет содержимого для публикации. Повторите создание поста.")
+        await state.finish()
+        return
+
+    if callback.data == "publish_now":
+        # публикуем сразу
+        await send_post_to_group(post)
+        # обновляем статистику и историю
+        ukey = str(callback.from_user.id)
+        init_user(callback.from_user.id)
+        today = datetime.now().day
+        if users_data[ukey].get("last_post_day") != today:
+            users_data[ukey]["posts_today"] = 0
+            users_data[ukey]["last_post_day"] = today
+        users_data[ukey]["posts_today"] = users_data[ukey].get("posts_today", 0) + 1
+        users_data[ukey].setdefault("history", []).append(post)
+        if len(users_data[ukey]["history"]) > 5:
+            users_data[ukey]["history"] = users_data[ukey]["history"][-5:]
+        save_users(users_data)
+        await callback.message.answer("✅ Пост опубликован!", reply_markup=main_menu_kb())
+        await state.finish()
+        return
+
+    # Отложить публикацию — запрашиваем время
+    tariff = TARIFFS[users_data[str(callback.from_user.id)]["tariff"]]
+    if not tariff["delay"]:
+        await callback.message.answer("⏰ Отложенные публикации недоступны на вашем тарифе.", reply_markup=main_menu_kb())
+        await state.finish()
+        return
+
+    await callback.message.answer("Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):", reply_markup=None)
+    await States.waiting_for_schedule_time.set()
+
+@dp.message_handler(state=States.waiting_for_schedule_time, content_types=types.ContentTypes.TEXT)
+async def schedule_time_handler(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    try:
+        publish_time = datetime.strptime(text, "%Y-%m-%d %H:%M")
+    except ValueError:
+        await message.answer("Неверный формат времени. Попробуйте снова (пример: 2025-09-05 14:30).")
+        return
+    data = await state.get_data()
+    post = data.get("post_content")
+    if not post:
+        await message.answer("Нет содержимого для публикации. Начните заново.")
+        await state.finish()
+        return
+    scheduled_posts.append({"time": publish_time, "post": post, "user_id": message.from_user.id})
+    await message.answer(f"✅ Пост запланирован на {publish_time.strftime('%d-%m-%Y %H:%M')}", reply_markup=main_menu_kb())
+    await state.finish()
+
+# ------------------ Запуск / завершение ------------------
+async def on_startup(dp):
+    logger.info("Запуск бота...")
+    # запустим воркер для отложенных постов
+    asyncio.create_task(scheduled_post_worker())
+
+async def on_shutdown(dp):
+    logger.info("Выключение бота, закрываю сессию...")
+    try:
+        await bot.session.close()
+    except Exception:
+        pass
+
+if __name__ == "__main__":
+    # Убедимся, что admin присутствует
+    init_user(ADMIN_ID)
+    # стартуем
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
