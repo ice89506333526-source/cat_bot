@@ -1,3 +1,6 @@
+import sys
+print(">>> PYTHON VERSION:", sys.version)
+
 # bot.py — Telegram bot: публикации в группу, тарифы, история, оплата с фискализацией (ЮKassa)
 # Поместите этот файл в папку проекта, активируйте venv и запустите: python bot.py
 
