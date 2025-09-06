@@ -25,16 +25,15 @@ from collections import defaultdict
 media_groups = defaultdict(list)
 
 # ------------------ Фейковый веб-сервер для Render ------------------
-async def handle(request):
-    return web.Response(text="Bot is running!")
+from aiohttp import web
+import os
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
-    await site.start()
+async def handle_health(request):
+    return web.Response(text="OK")
+
+app = web.Application()
+app.router.add_get('/', handle_health)  # root path для Health Check
+app.router.add_get('/healthz', handle_health)  # Render тоже можно проверять на /healthz
 
 
 # ------------------ Константы (вставлены ваши данные) ------------------
@@ -590,8 +589,16 @@ async def on_shutdown(dp):
         pass
 
 if __name__ == "__main__":
+    # Убедимся, что админ присутствует
     init_user(ADMIN_ID)
+
+    # запуск бота через polling
     loop = asyncio.get_event_loop()
-    loop.create_task(start_web_server())  # Запускаем фейковый веб-сервер для Render
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
+    loop.create_task(scheduled_post_worker())  # планировщик отложенных постов
+    loop.create_task(dp.start_polling())       # запуск polling
+
+    # запуск aiohttp-фейкового сервера для Render
+    PORT = int(os.environ.get("PORT", 10000))
+    web.run_app(app, port=PORT)
+
 
