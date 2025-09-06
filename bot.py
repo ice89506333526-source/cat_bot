@@ -589,16 +589,37 @@ async def on_shutdown(dp):
         pass
 
 if __name__ == "__main__":
-    # Убедимся, что админ присутствует
+    # Инициализация админа
     init_user(ADMIN_ID)
 
-    # запуск бота через polling
+    # Получаем loop
     loop = asyncio.get_event_loop()
-    loop.create_task(scheduled_post_worker())  # планировщик отложенных постов
-    loop.create_task(dp.start_polling())       # запуск polling
 
-    # запуск aiohttp-фейкового сервера для Render
-    PORT = int(os.environ.get("PORT", 10000))
-    web.run_app(app, port=PORT)
+    # Планировщик отложенных постов
+    loop.create_task(scheduled_post_worker())
+
+    # Запуск polling бота
+    loop.create_task(dp.start_polling())
+
+    # Запуск aiohttp-фейкового сервера (не блокируем loop)
+    from aiohttp import web
+
+    async def handle(request):
+        return web.Response(text="Bot is running!")
+
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    
+    async def start_web():
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+        await site.start()
+    
+    loop.create_task(start_web())  # фейковый сервер запускается как задача
+
+    # Запускаем loop
+    loop.run_forever()
+
 
 
