@@ -578,48 +578,30 @@ async def schedule_time_handler(message: types.Message, state: FSMContext):
 # ------------------ Запуск / завершение ------------------
 async def on_startup(dp):
     logger.info("Запуск бота...")
-    # запустим воркер для отложенных постов
-    asyncio.create_task(scheduled_post_worker())
 
 async def on_shutdown(dp):
-    logger.info("Выключение бота, закрываю сессию...")
-    try:
-        await bot.session.close()
-    except Exception:
-        pass
+    logger.info("Остановка бота...")
 
-if __name__ == "__main__":
-    # Инициализация админа
+
+async def main():
+    # Убедимся, что админ присутствует
     init_user(ADMIN_ID)
 
-    # Получаем loop
-    loop = asyncio.get_event_loop()
+    # Запускаем планировщик
+    asyncio.create_task(scheduled_post_worker())
 
-    # Планировщик отложенных постов
-    loop.create_task(scheduled_post_worker())
-
-    # Запуск polling бота
-    loop.create_task(dp.start_polling())
-
-    # Запуск aiohttp-фейкового сервера (не блокируем loop)
-    from aiohttp import web
-
-    async def handle(request):
-        return web.Response(text="Bot is running!")
-
-    app = web.Application()
-    app.router.add_get("/", handle)
+    # Запускаем aiohttp-фейковый сервер для Render
+    PORT = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
-    
-    async def start_web():
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
-        await site.start()
-    
-    loop.create_task(start_web())  # фейковый сервер запускается как задача
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
 
-    # Запускаем loop
-    loop.run_forever()
+    # Запускаем polling
+    await dp.start_polling(on_startup=on_startup, on_shutdown=on_shutdown)
 
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
