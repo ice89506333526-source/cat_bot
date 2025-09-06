@@ -17,6 +17,13 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
+from aiogram.types import ContentType
+from collections import defaultdict
+
+# Для сбора медиа, чтобы объединять в один пост
+media_groups = defaultdict(list)
+
+
 
 # ------------------ Константы (вставлены ваши данные) ------------------
 API_TOKEN = "8423035573:AAHo53sPuZJXbGXLhW5-EThbdXM5GrCULDQ"
@@ -450,26 +457,42 @@ async def handle_edit_submission(message: types.Message, state: FSMContext):
     await state.finish()
 
 # Получение поста после нажатия 'Создать пост'
-@dp.message_handler(state=States.waiting_for_post, content_types=types.ContentTypes.ANY)
-async def handle_new_post(message: types.Message, state: FSMContext):
+from aiogram.types import ContentType
+
+@dp.message_handler(state=States.waiting_for_post, content_types=ContentType.ANY)
+async def handle_post(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     init_user(uid)
-    post = {}
-    if message.content_type == "text":
-        post = {"type": "text", "text": message.text}
-    elif message.content_type == "photo":
-        post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption}
-    elif message.content_type == "video":
-        post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption}
-    else:
-        await message.answer("Этот тип контента пока не поддерживается.")
-        await state.finish()
-        return
 
-    # сохраняем временно в state
+    # Если медиа-группа (альбом)
+    if message.media_group_id:
+        media_groups[uid].append(message)
+        # Ждём немного, чтобы собрать все сообщения группы
+        await asyncio.sleep(0.5)
+        # Берём первый пост группы для создания единого объекта
+        first = media_groups[uid][0]
+        if first.photo:
+            post = {"type": "photo", "file_id": first.photo[-1].file_id, "caption": first.caption or ""}
+        elif first.video:
+            post = {"type": "video", "file_id": first.video.file_id, "caption": first.caption or ""}
+        else:
+            post = {"type": "text", "text": first.caption or ""}
+        # очищаем хранилище для этого пользователя
+        media_groups[uid].clear()
+    else:
+        # одиночное сообщение (текст, фото или видео)
+        if message.photo:
+            post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
+        elif message.video:
+            post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
+        else:
+            post = {"type": "text", "text": message.text}
+
+    # сохраняем весь пост в state
     await state.update_data(post_content=post)
-    # отправляем кнопки: сразу / отложить
-    await message.answer("Выбери действие для публикации:", reply_markup=publish_choice_kb())
+    # показываем пользователю кнопки для публикации
+    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
 
 # Callback publish_now / schedule_post
 @dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state="*")
@@ -478,40 +501,49 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     post = data.get("post_content")
     if not post:
-        await callback.message.answer("Нет содержимого для публикации. Повторите создание поста.")
+        await callback.message.answer("Нет содержимого для публикации. Начните заново.")
+        await state.finish()
+        return
+
+    ukey = str(callback.from_user.id)
+    user = init_user(callback.from_user.id)
+    today = datetime.now().day
+    if user.get("last_post_day") != today:
+        user["posts_today"] = 0
+        user["last_post_day"] = today
+
+    tariff = TARIFFS[user["tariff"]]
+    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
+        await callback.message.answer("⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.", reply_markup=make_tariff_kb(user["tariff"]))
         await state.finish()
         return
 
     if callback.data == "publish_now":
-        # публикуем сразу
         await send_post_to_group(post)
-        # обновляем статистику и историю
-        ukey = str(callback.from_user.id)
-        init_user(callback.from_user.id)
-        today = datetime.now().day
-        if users_data[ukey].get("last_post_day") != today:
-            users_data[ukey]["posts_today"] = 0
-            users_data[ukey]["last_post_day"] = today
-        users_data[ukey]["posts_today"] = users_data[ukey].get("posts_today", 0) + 1
-        users_data[ukey].setdefault("history", []).append(post)
-        if len(users_data[ukey]["history"]) > 5:
-            users_data[ukey]["history"] = users_data[ukey]["history"][-5:]
+        user["posts_today"] = user.get("posts_today", 0) + 1
+        user.setdefault("history", []).append(post)
+        # trim history до последних 5
+        if len(user["history"]) > 5:
+            user["history"] = user["history"][-5:]
         save_users(users_data)
         await callback.message.answer("✅ Пост опубликован!", reply_markup=main_menu_kb())
         await state.finish()
         return
 
-    # Отложить публикацию — запрашиваем время
-    tariff = TARIFFS[users_data[str(callback.from_user.id)]["tariff"]]
+    # отложенная публикация
     if not tariff["delay"]:
         await callback.message.answer("⏰ Отложенные публикации недоступны на вашем тарифе.", reply_markup=main_menu_kb())
         await state.finish()
         return
 
-    await callback.message.answer("Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):", reply_markup=None)
+    await callback.message.answer(
+        "Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):",
+        reply_markup=None
+    )
     await States.waiting_for_schedule_time.set()
 
-@dp.message_handler(state=States.waiting_for_schedule_time, content_types=types.ContentTypes.TEXT)
+
+@dp.message_handler(state=States.waiting_for_schedule_time, content_types=ContentType.TEXT)
 async def schedule_time_handler(message: types.Message, state: FSMContext):
     text = message.text.strip()
     try:
@@ -519,15 +551,18 @@ async def schedule_time_handler(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("Неверный формат времени. Попробуйте снова (пример: 2025-09-05 14:30).")
         return
+
     data = await state.get_data()
     post = data.get("post_content")
     if not post:
         await message.answer("Нет содержимого для публикации. Начните заново.")
         await state.finish()
         return
+
     scheduled_posts.append({"time": publish_time, "post": post, "user_id": message.from_user.id})
     await message.answer(f"✅ Пост запланирован на {publish_time.strftime('%d-%m-%Y %H:%M')}", reply_markup=main_menu_kb())
     await state.finish()
+
 
 # ------------------ Запуск / завершение ------------------
 async def on_startup(dp):
