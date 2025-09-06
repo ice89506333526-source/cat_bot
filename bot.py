@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 from typing import Dict, Any, List
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -23,6 +24,17 @@ from collections import defaultdict
 # Для сбора медиа, чтобы объединять в один пост
 media_groups = defaultdict(list)
 
+# ------------------ Фейковый веб-сервер для Render ------------------
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+    await site.start()
 
 
 # ------------------ Константы (вставлены ваши данные) ------------------
@@ -578,7 +590,8 @@ async def on_shutdown(dp):
         pass
 
 if __name__ == "__main__":
-    # Убедимся, что admin присутствует
     init_user(ADMIN_ID)
-    # стартуем
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web_server())  # Запускаем фейковый веб-сервер для Render
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
+
