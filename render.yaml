@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: cat_bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    plan: free
