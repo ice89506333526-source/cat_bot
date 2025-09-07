@@ -11,7 +11,6 @@ import os
 from datetime import datetime
 from typing import Dict, Any, List
 
-from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -24,16 +23,6 @@ from collections import defaultdict
 # Для сбора медиа, чтобы объединять в один пост
 media_groups = defaultdict(list)
 
-# ------------------ Фейковый веб-сервер для Render ------------------
-from aiohttp import web
-import os
-
-async def handle_health(request):
-    return web.Response(text="OK")
-
-app = web.Application()
-app.router.add_get('/', handle_health)  # root path для Health Check
-app.router.add_get('/healthz', handle_health)  # Render тоже можно проверять на /healthz
 
 
 # ------------------ Константы (вставлены ваши данные) ------------------
@@ -122,22 +111,31 @@ scheduled_posts: List[Dict[str, Any]] = []  # каждый элемент: {"tim
 
 async def scheduled_post_worker():
     while True:
-        now = datetime.now()
-        # копируем, чтобы безопасно итерировать
-        for task in scheduled_posts[:]:
+        now = datetime.utcnow()
+        for task in list(scheduled_posts):
             if task["time"] <= now:
-                await send_post_to_group(task["post"])
-                # обновляем историю/лимит
                 ukey = str(task["user_id"])
                 init_user(task["user_id"])
-                users_data[ukey]["history"].append(task["post"])
-                users_data[ukey]["posts_today"] = users_data[ukey].get("posts_today", 0) + 1
-                # trim history to last 5
-                if len(users_data[ukey]["history"]) > 5:
-                    users_data[ukey]["history"] = users_data[ukey]["history"][-5:]
-                save_users(users_data)
+
+                if can_post(task["user_id"]):
+                    await send_post_to_group(task["post"])
+                    register_post(task["user_id"])
+
+                    users_data[ukey]["history"].append(task["post"])
+                    # trim history to last 5
+                    if len(users_data[ukey]["history"]) > 5:
+                        users_data[ukey]["history"] = users_data[ukey]["history"][-5:]
+                    save_users(users_data)
+                else:
+                    try:
+                        await bot.send_message(task["user_id"], "⚠️ Лимит публикаций исчерпан, запланированный пост не опубликован.")
+                    except:
+                        pass
+
                 scheduled_posts.remove(task)
+
         await asyncio.sleep(15)
+
 
 # ------------------ Kлавиатуры ------------------
 def main_menu_kb() -> types.InlineKeyboardMarkup:
@@ -388,27 +386,25 @@ async def cb_repost(callback: types.CallbackQuery):
     except ValueError:
         await callback.message.answer("Неверный индекс поста.")
         return
+
     user = init_user(callback.from_user.id)
     hist = user.get("history", [])
     if idx < 0 or idx >= len(hist):
         await callback.message.answer("Пост не найден.")
         return
 
-    today = datetime.now().day
-    if user.get("last_post_day") != today:
-        user["posts_today"] = 0
-        user["last_post_day"] = today
-
-    tariff = TARIFFS[user["tariff"]]
-    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
-        await callback.message.answer("⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.", reply_markup=make_tariff_kb(user["tariff"]))
+    # Проверка лимитов
+    if not can_post(callback.from_user.id):
+        await callback.message.answer("⚠️ Лимит публикаций на сегодня исчерпан.")
         return
 
     post = hist[idx]
     await send_post_to_group(post)
-    user["posts_today"] = user.get("posts_today", 0) + 1
-    save_users(users_data)
+    register_post(callback.from_user.id)
+
     await callback.message.answer("✅ Пост опубликован повторно!", reply_markup=main_menu_kb())
+
+
 
 # Редактирование поста (простой поток: пользователь отправляет новый контент; заменяем запись в истории)
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("edit:"))
@@ -578,30 +574,18 @@ async def schedule_time_handler(message: types.Message, state: FSMContext):
 # ------------------ Запуск / завершение ------------------
 async def on_startup(dp):
     logger.info("Запуск бота...")
-
-async def on_shutdown(dp):
-    logger.info("Остановка бота...")
-
-
-async def main():
-    # Убедимся, что админ присутствует
-    init_user(ADMIN_ID)
-
-    # Запускаем планировщик
+    # запустим воркер для отложенных постов
     asyncio.create_task(scheduled_post_worker())
 
-    # Запускаем aiohttp-фейковый сервер для Render
-    PORT = int(os.environ.get("PORT", 10000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-    # Запускаем polling
-    await dp.start_polling(on_startup=on_startup, on_shutdown=on_shutdown)
-
+async def on_shutdown(dp):
+    logger.info("Выключение бота, закрываю сессию...")
+    try:
+        await bot.session.close()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
-
+    # Убедимся, что admin присутствует
+    init_user(ADMIN_ID)
+    # стартуем
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
