@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -181,7 +182,12 @@ async def send_post_to_group(post: Dict[str, Any]) -> None:
 # ------------------ Хендлеры ------------------
 
 @dp.message_handler(commands=["start"])
-async def on_start(message: types.Message):
+async def cmd_start(message: types.Message):
+    args = message.get_args()
+    if args == "from_group":
+        await message.answer("Привет! Я помогу публиковать посты в группу 🚀", reply_markup=main_menu_kb())
+    else:
+        await message.answer("Добро пожаловать! Выберите действие:", reply_markup=main_menu_kb())
     # если команда в группе — просто ссылка на личку
     if message.chat.type != types.ChatType.PRIVATE:
         await message.reply(f"Публикация постов ЗДЕСЬ — перейдите в личку: @{BOT_USERNAME}")
@@ -550,7 +556,7 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
     await States.waiting_for_schedule_time.set()
 
 
-@dp.message_handler(state=States.waiting_for_schedule_time, content_types=ContentType.TEXT)
+@dp.message_handler(state=States.waiting_for_schedule_time, content_types=types.ContentTypes.TEXT)
 async def schedule_time_handler(message: types.Message, state: FSMContext):
     text = message.text.strip()
     try:
@@ -566,14 +572,56 @@ async def schedule_time_handler(message: types.Message, state: FSMContext):
         await state.finish()
         return
 
-    scheduled_posts.append({"time": publish_time, "post": post, "user_id": message.from_user.id})
-    await message.answer(f"✅ Пост запланирован на {publish_time.strftime('%d-%m-%Y %H:%M')}", reply_markup=main_menu_kb())
+    scheduled_posts.append({
+        "time": publish_time,
+        "post": post,
+        "user_id": message.from_user.id
+    })
+    await message.answer(
+        f"✅ Пост запланирован на {publish_time.strftime('%d-%m-%Y %H:%M')}",
+        reply_markup=main_menu_kb()
+    )
     await state.finish()
+   # ← конец функции
+
+
+# ------------------ Приглашение из группы ------------------
+GROUP_ID = -1002522022019  # ⚠️ замени на ID своей группы
+
+async def send_group_invite(bot: Bot):
+    try:
+        invite_link = await bot.export_chat_invite_link(GROUP_ID)
+        await bot.send_message(
+            GROUP_ID,
+            f"👋 Чтобы публиковать посты, напишите мне в личку: @{BOT_USERNAME}\n\n"
+            f"[👉 Нажмите сюда, чтобы открыть бота](https://t.me/{BOT_USERNAME})",
+            parse_mode="Markdown"
+        )
+        logger.info("Инвайт-сообщение отправлено в группу.")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке ссылки в группу: {e}")
+    keyboard = InlineKeyboardMarkup().add(
+        InlineKeyboardButton(
+            text="🚀 Начать работу",
+            url=f"https://t.me/{(await bot.me).username}?start=from_group"
+        )
+    )
+    msg = await bot.send_message(
+        GROUP_ID,
+        "Чтобы публиковать посты через бота, нажмите кнопку ниже 👇",
+        reply_markup=keyboard
+    )
+    try:
+        await bot.pin_chat_message(GROUP_ID, msg.message_id, disable_notification=True)
+    except Exception as e:
+        logging.warning(f"Не удалось закрепить сообщение: {e}")
 
 
 # ------------------ Запуск / завершение ------------------
 async def on_startup(dp):
+    await send_group_invite(dp.bot)
     logger.info("Запуск бота...")
+
     # запустим воркер для отложенных постов
     asyncio.create_task(scheduled_post_worker())
 
