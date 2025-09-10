@@ -7,4 +7,9 @@ venv\Scripts\activate
 python bot.py
 
 
-git remote add origin https://github.com/ice89506333526-source/cat_bot.git
+
+обновление bot.py на рендер 
+
+git add bot.py
+git commit -m "Update bot.py with media group fix and Render web server"
+git push
