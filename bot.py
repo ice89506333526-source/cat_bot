@@ -633,7 +633,23 @@ async def on_shutdown(dp):
         pass
 
 if __name__ == "__main__":
-    # Убедимся, что admin присутствует
-    init_user(ADMIN_ID)
+    async def main():
+        # Убедимся, что админ присутствует
+        init_user(ADMIN_ID)
+
+        # Запускаем планировщик отложенных постов
+        asyncio.create_task(scheduled_post_worker())
+
+        # Запускаем aiohttp веб-сервер для Render
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+        await site.start()
+
+        # Запускаем polling
+        await dp.start_polling()
+
+    asyncio.run(main())
+
     # стартуем
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
