@@ -605,12 +605,13 @@ async def handle_webhook(request: web.Request):
     # Устанавливаем текущий бот для Aiogram
     Bot.set_current(bot)
 
-try:
-    await dp.process_update(update)
-    return web.Response(status=200)
-except Exception as e:
-    logger.exception("Ошибка при обработке update: %s", e)
-    return web.Response(status=500, text=f"Internal Error: {str(e)}")
+    try:
+        await dp.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.exception("Ошибка при обработке update: %s", e)
+        return web.Response(status=500, text=f"Internal Error: {str(e)}")
+
 
 
 
