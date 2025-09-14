@@ -499,7 +499,7 @@ async def handle_post(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     init_user(uid)
 
-    # Проверяем, не пришла ли уже медиа-группа
+    # Проверяем, не пришла ли медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
         await asyncio.sleep(0.5)  # собираем все сообщения группы
@@ -520,13 +520,14 @@ async def handle_post(message: types.Message, state: FSMContext):
             post = {"type": "text", "text": message.text}
 
     # Сохраняем пост в state
-await state.update_data(post_content=post)
+    await state.update_data(post_content=post)
 
-# Снимаем состояние, чтобы не ловить повторные сообщения
-await state.reset_state(with_data=False)
+    # Снимаем состояние, чтобы не ловить повторные сообщения
+    await state.reset_state(with_data=False)
 
-# Отправляем кнопки для публикации
-await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+    # Отправляем кнопки для публикации
+    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
 
 
 
