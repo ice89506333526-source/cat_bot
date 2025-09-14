@@ -211,6 +211,8 @@ async def on_start(message: types.Message):
 # Обработчик кнопок: Создать пост
 @dp.callback_query_handler(lambda c: c.data == "create_post")
 async def cb_create_post(callback: types.CallbackQuery):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     await callback.answer()
     user = init_user(callback.from_user.id)
     today = datetime.now().day
@@ -261,6 +263,8 @@ async def cb_pay(callback: types.CallbackQuery):
 # Промежуточный: запрос email -> отправка invoice
 @dp.message_handler(state=States.waiting_for_email_for_payment, content_types=types.ContentTypes.TEXT)
 async def email_for_payment_handler(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     email = message.text.strip()
     # простая валидация
     if "@" not in email or "." not in email:
@@ -426,6 +430,8 @@ async def cb_repost(callback: types.CallbackQuery):
 # Редактирование поста (простой поток: пользователь отправляет новый контент; заменяем запись в истории)
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("edit:"))
 async def cb_edit(callback: types.CallbackQuery):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     await callback.answer()
     _, idx_str = callback.data.split(":", 1)
     try:
@@ -448,6 +454,8 @@ async def cb_edit(callback: types.CallbackQuery):
 
 @dp.message_handler(state=States.waiting_for_edit_index, content_types=types.ContentTypes.ANY)
 async def handle_edit_submission(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     key = str(message.from_user.id)
     init_user(message.from_user.id)
     idx = users_data[key].get("_editing_index")
@@ -485,6 +493,8 @@ from aiogram.types import ContentType
 
 @dp.message_handler(state=States.waiting_for_post, content_types=ContentType.ANY)
 async def handle_post(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     uid = message.from_user.id
     init_user(uid)
 
@@ -539,6 +549,8 @@ async def handle_post(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=States.waiting_for_schedule_time, content_types=ContentType.TEXT)
 async def schedule_time_handler(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     text = message.text.strip()
     try:
         publish_time = datetime.strptime(text, "%Y-%m-%d %H:%M")
