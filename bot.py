@@ -522,8 +522,12 @@ async def handle_post(message: types.Message, state: FSMContext):
     # Сохраняем пост в state
     await state.update_data(post_content=post)
 
-    # Важно: остаёмся в состоянии waiting_for_post, чтобы коллбэк поймал publish_now/schedule_post
+    # Показываем кнопки выбора публикации
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
+    # Переводим пользователя в состояние выбора действия
+    await States.waiting_for_publish_choice.set()
+
 
 
     # Снимаем состояние, чтобы не ловить повторные сообщения
@@ -537,7 +541,8 @@ async def handle_post(message: types.Message, state: FSMContext):
 
 
 # Обработка кнопок "Сразу публиковать" и "Отложить публикацию"
-@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state=States.waiting_for_post)
+# Callback publish_now / schedule_post
+@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state=States.waiting_for_publish_choice)
 async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
@@ -571,15 +576,19 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
         await send_post_to_group(post)
         user["posts_today"] = user.get("posts_today", 0) + 1
         user.setdefault("history", []).append(post)
+
+        # trim history до последних 5
         if len(user["history"]) > 5:
             user["history"] = user["history"][-5:]
+
         save_users(users_data)
         await callback.message.answer("✅ Пост опубликован!", reply_markup=main_menu_kb())
         await state.finish()
-    elif callback.data == "schedule_post":
-        if not tariff["delay"]:
-            await callback.message.answer("⏰ Отложенные публикации недоступны на вашем тарифе.", reply_markup=main_menu_kb())
-            await state.finish()
+    else:
+        # если выбрали "schedule_post"
+        await callback.message.answer("Введите дату и время публикации (в формате YYYY-MM-DD HH:MM):")
+        await States.waiting_for_schedule_time.set()
+
             return
         await callback.message.answer(
             "Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):"
