@@ -491,6 +491,7 @@ async def handle_edit_submission(message: types.Message, state: FSMContext):
 # Получение поста после нажатия 'Создать пост'
 from aiogram.types import ContentType
 
+# Получение поста после нажатия 'Создать пост'
 @dp.message_handler(state=States.waiting_for_post, content_types=ContentType.ANY)
 async def handle_post(message: types.Message, state: FSMContext):
     Bot.set_current(bot)
@@ -522,25 +523,11 @@ async def handle_post(message: types.Message, state: FSMContext):
     # Сохраняем пост в state
     await state.update_data(post_content=post)
 
-    # Показываем кнопки выбора публикации
+    # Переводим в состояние выбора действия
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
-
-    # Переводим пользователя в состояние выбора действия
     await States.waiting_for_publish_choice.set()
 
 
-
-    # Снимаем состояние, чтобы не ловить повторные сообщения
-    await state.reset_state(with_data=False)
-
-    # Отправляем кнопки для публикации
-    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
-
-
-
-
-
-# Обработка кнопок "Сразу публиковать" и "Отложить публикацию"
 # Callback publish_now / schedule_post
 @dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state=States.waiting_for_publish_choice)
 async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
@@ -589,11 +576,6 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer("Введите дату и время публикации (в формате YYYY-MM-DD HH:MM):")
         await States.waiting_for_schedule_time.set()
 
-            return
-        await callback.message.answer(
-            "Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):"
-        )
-        await States.waiting_for_schedule_time.set()
 
 
 
