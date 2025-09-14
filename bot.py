@@ -493,6 +493,10 @@ async def handle_post(message: types.Message, state: FSMContext):
         media_groups[uid].append(message)
         # Ждём немного, чтобы собрать все сообщения группы
         await asyncio.sleep(0.5)
+        # Если это не последний элемент альбома — выходим и ждём остальные
+        if len(media_groups[uid]) < getattr(message, "media_group_count", len(media_groups[uid])):
+            return
+
         # Берём первый пост группы для создания единого объекта
         first = media_groups[uid][0]
         if first.photo:
@@ -501,8 +505,10 @@ async def handle_post(message: types.Message, state: FSMContext):
             post = {"type": "video", "file_id": first.video.file_id, "caption": first.caption or ""}
         else:
             post = {"type": "text", "text": first.caption or ""}
+
         # очищаем хранилище для этого пользователя
         media_groups[uid].clear()
+
     else:
         # одиночное сообщение (текст, фото или видео)
         if message.photo:
@@ -517,42 +523,6 @@ async def handle_post(message: types.Message, state: FSMContext):
     # показываем пользователю кнопки для публикации
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
 
-
-# Callback publish_now / schedule_post
-@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state="*")
-async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    post = data.get("post_content")
-    if not post:
-        await callback.message.answer("Нет содержимого для публикации. Начните заново.")
-        await state.finish()
-        return
-
-    ukey = str(callback.from_user.id)
-    user = init_user(callback.from_user.id)
-    today = datetime.now().day
-    if user.get("last_post_day") != today:
-        user["posts_today"] = 0
-        user["last_post_day"] = today
-
-    tariff = TARIFFS[user["tariff"]]
-    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
-        await callback.message.answer("⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.", reply_markup=make_tariff_kb(user["tariff"]))
-        await state.finish()
-        return
-
-    if callback.data == "publish_now":
-        await send_post_to_group(post)
-        user["posts_today"] = user.get("posts_today", 0) + 1
-        user.setdefault("history", []).append(post)
-        # trim history до последних 5
-        if len(user["history"]) > 5:
-            user["history"] = user["history"][-5:]
-        save_users(users_data)
-        await callback.message.answer("✅ Пост опубликован!", reply_markup=main_menu_kb())
-        await state.finish()
-        return
 
     # отложенная публикация
     if not tariff["delay"]:
