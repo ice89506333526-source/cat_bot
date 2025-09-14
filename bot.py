@@ -597,12 +597,17 @@ async def on_startup(dp):
 async def handle_webhook(request: web.Request):
     try:
         data = await request.json()
-    except Exception as e:
-        logger.exception("Ошибка при разборе JSON webhook:")
-        return web.Response(status=400, text="Invalid JSON")
+    except Exception:
+        return web.Response(status=400)
 
-    try:
-        update = types.Update(**data)
+    update = types.Update(**data)
+    
+    # Устанавливаем текущий бот для Aiogram
+    Bot.set_current(bot)
+
+    await dp.process_update(update)
+    return web.Response(status=200)
+
         await dp.process_update(update)
         return web.Response(status=200)
     except Exception as e:
