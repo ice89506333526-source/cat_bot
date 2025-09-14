@@ -522,6 +522,10 @@ async def handle_post(message: types.Message, state: FSMContext):
     # Сохраняем пост в state
     await state.update_data(post_content=post)
 
+    # Важно: остаёмся в состоянии waiting_for_post, чтобы коллбэк поймал publish_now/schedule_post
+    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
+
     # Снимаем состояние, чтобы не ловить повторные сообщения
     await state.reset_state(with_data=False)
 
@@ -533,14 +537,15 @@ async def handle_post(message: types.Message, state: FSMContext):
 
 
 # Обработка кнопок "Сразу публиковать" и "Отложить публикацию"
-@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state="*")
+@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state=States.waiting_for_post)
 async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
-    await callback.answer()
 
+    await callback.answer()
     data = await state.get_data()
     post = data.get("post_content")
+
     if not post:
         await callback.message.answer("Нет содержимого для публикации. Начните заново.")
         await state.finish()
@@ -556,7 +561,7 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
     tariff = TARIFFS[user["tariff"]]
     if user.get("posts_today", 0) >= tariff["posts_per_day"]:
         await callback.message.answer(
-            "⚠️ Лимит публикаций на сегодня исчерпан. Смените тариф.",
+            "⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.",
             reply_markup=make_tariff_kb(user["tariff"])
         )
         await state.finish()
@@ -571,21 +576,16 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
         save_users(users_data)
         await callback.message.answer("✅ Пост опубликован!", reply_markup=main_menu_kb())
         await state.finish()
-        return
-
-    if callback.data == "schedule_post":
+    elif callback.data == "schedule_post":
         if not tariff["delay"]:
-            await callback.message.answer(
-                "⏰ Отложенные публикации недоступны на вашем тарифе.",
-                reply_markup=main_menu_kb()
-            )
+            await callback.message.answer("⏰ Отложенные публикации недоступны на вашем тарифе.", reply_markup=main_menu_kb())
             await state.finish()
             return
         await callback.message.answer(
-            "Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):",
-            reply_markup=None
+            "Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):"
         )
         await States.waiting_for_schedule_time.set()
+
 
 
 
