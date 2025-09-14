@@ -597,12 +597,19 @@ async def on_startup(dp):
 async def handle_webhook(request: web.Request):
     try:
         data = await request.json()
-    except Exception:
-        return web.Response(status=400)
+    except Exception as e:
+        logger.exception("Ошибка при разборе JSON webhook:")
+        return web.Response(status=400, text="Invalid JSON")
 
-    update = types.Update(**data)
-    await dp.process_update(update)
-    return web.Response(status=200)
+    try:
+        update = types.Update(**data)
+        await dp.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.exception("Ошибка при обработке update:")
+        # Возвращаем текст ошибки в логах, Telegram получит 500, но мы знаем причину
+        return web.Response(status=500, text=f"Internal Error: {str(e)}")
+
 
 
 # ---------------- Main entry ----------------
