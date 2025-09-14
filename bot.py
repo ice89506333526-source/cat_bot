@@ -30,32 +30,30 @@ media_groups = defaultdict(list)
 # ------------------ Константы (вставлены ваши данные) ------------------
 API_TOKEN = "8423035573:AAHo53sPuZJXbGXLhW5-EThbdXM5GrCULDQ"
 BOT_USERNAME = "cat777_cash_bot"
-GROUP_ID = -1002522022019  # -1002522022019
+GROUP_ID = -1002522022019
 ADMIN_ID = 827299190
-# Provider token для Telegram Payments (токен магазина, который выдаёт BotFather при подключении ЮKassa)
-PROVIDER_TOKEN = "390540012:LIVE:77400"
 
-# Доп. (для справки) Yookassa shop и secret (не используются напрямую для send_invoice)
-YOOKASSA_SHOP_ID = "1151636"
-YOOKASSA_SECRET_KEY = "live_9WZWrOx1vsciG0JzhQqb8fP_JdPwvLJ3YSJBbc1acBE"
-
-USERS_FILE = "users_data.json"
-
-# ---------------- Webhook settings (step 1) ----------------
+# ---------------- Webhook settings ----------------
 # Путь webhook — содержит токен, чтобы усложнить доступ сторонним
 WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
 
 # Render предоставляет публичный hostname в переменной окружения RENDER_EXTERNAL_HOSTNAME.
-# Соберём публичный URL webhook (https://<render-host><WEBHOOK_PATH>).
-RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")  # на Render — вроде cat-bot-4.onrender.com
+# Соберём публичный URL webhook
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")  # на Render вроде cat-bot-4.onrender.com
 PORT = int(os.environ.get("PORT", 10000))
 
 if RENDER_HOST:
     WEBHOOK_URL = f"https://{RENDER_HOST}{WEBHOOK_PATH}"
 else:
-    # fallback для локальной разработки (Telegram требует HTTPS — для локали нужно ngrok)
+    # fallback для локальной разработки (Telegram требует HTTPS — для локали нужен ngrok)
     WEBHOOK_URL = f"http://localhost:{PORT}{WEBHOOK_PATH}"
-# ---------------------------------------------------------
+
+# Provider token для Telegram Payments
+PROVIDER_TOKEN = "390540012:LIVE:77400"
+YOOKASSA_SHOP_ID = "1151636"
+YOOKASSA_SECRET_KEY = "live_9WZWrOx1vsciG0JzhQqb8fP_JdPwvLJ3YSJBbc1acBE"
+
+USERS_FILE = "users_data.json"
 
 
 # ------------------ Тарифы ------------------
@@ -594,7 +592,6 @@ async def schedule_time_handler(message: types.Message, state: FSMContext):
 async def on_startup(dp):
     logger.info("Запуск бота...")
     # запустим воркер для отложенных постов
-    asyncio.create_task(scheduled_post_worker())
 
 # ---------------- Webhook handler ----------------
 async def handle_webhook(request: web.Request):
