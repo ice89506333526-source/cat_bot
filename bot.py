@@ -19,6 +19,8 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 from aiogram.types import ContentType
 from collections import defaultdict
+from aiohttp import web
+
 
 # Для сбора медиа, чтобы объединять в один пост
 media_groups = defaultdict(list)
@@ -38,6 +40,23 @@ YOOKASSA_SHOP_ID = "1151636"
 YOOKASSA_SECRET_KEY = "live_9WZWrOx1vsciG0JzhQqb8fP_JdPwvLJ3YSJBbc1acBE"
 
 USERS_FILE = "users_data.json"
+
+# ---------------- Webhook settings (step 1) ----------------
+# Путь webhook — содержит токен, чтобы усложнить доступ сторонним
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+
+# Render предоставляет публичный hostname в переменной окружения RENDER_EXTERNAL_HOSTNAME.
+# Соберём публичный URL webhook (https://<render-host><WEBHOOK_PATH>).
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")  # на Render — вроде cat-bot-4.onrender.com
+PORT = int(os.environ.get("PORT", 10000))
+
+if RENDER_HOST:
+    WEBHOOK_URL = f"https://{RENDER_HOST}{WEBHOOK_PATH}"
+else:
+    # fallback для локальной разработки (Telegram требует HTTPS — для локали нужно ngrok)
+    WEBHOOK_URL = f"http://localhost:{PORT}{WEBHOOK_PATH}"
+# ---------------------------------------------------------
+
 
 # ------------------ Тарифы ------------------
 TARIFFS = {
@@ -577,15 +596,48 @@ async def on_startup(dp):
     # запустим воркер для отложенных постов
     asyncio.create_task(scheduled_post_worker())
 
-async def on_shutdown(dp):
-    logger.info("Выключение бота, закрываю сессию...")
+# ---------------- Webhook handler ----------------
+async def handle_webhook(request: web.Request):
     try:
-        await bot.session.close()
+        data = await request.json()
     except Exception:
-        pass
+        return web.Response(status=400)
 
-if __name__ == "__main__":
+    update = types.Update(**data)
+    await dp.process_update(update)
+    return web.Response(status=200)
+
+
+# ---------------- Main entry ----------------
+async def main():
     # Убедимся, что admin присутствует
     init_user(ADMIN_ID)
-    # стартуем
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
+
+    # Настраиваем webhook
+    await bot.delete_webhook()
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set: {WEBHOOK_URL}")
+
+    # Создаём aiohttp-приложение
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.router.add_get("/", lambda request: web.Response(text="Bot is running!"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info(f"Server started at http://0.0.0.0:{PORT}")
+
+    # Запустим воркер для отложенных постов
+    asyncio.create_task(scheduled_post_worker())
+
+    # Бесконечный цикл (держим alive)
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
