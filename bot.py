@@ -495,19 +495,14 @@ from aiogram.types import ContentType
 async def handle_post(message: types.Message, state: FSMContext):
     Bot.set_current(bot)
     Dispatcher.set_current(dp)
+
     uid = message.from_user.id
     init_user(uid)
 
-    # Если медиа-группа (альбом)
+    # Проверяем, не пришла ли уже медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
-        # Ждём немного, чтобы собрать все сообщения группы
-        await asyncio.sleep(0.5)
-        # Если это не последний элемент альбома — выходим и ждём остальные
-        if len(media_groups[uid]) < getattr(message, "media_group_count", len(media_groups[uid])):
-            return
-
-        # Берём первый пост группы для создания единого объекта
+        await asyncio.sleep(0.5)  # собираем все сообщения группы
         first = media_groups[uid][0]
         if first.photo:
             post = {"type": "photo", "file_id": first.photo[-1].file_id, "caption": first.caption or ""}
@@ -515,12 +510,8 @@ async def handle_post(message: types.Message, state: FSMContext):
             post = {"type": "video", "file_id": first.video.file_id, "caption": first.caption or ""}
         else:
             post = {"type": "text", "text": first.caption or ""}
-
-        # очищаем хранилище для этого пользователя
         media_groups[uid].clear()
-
     else:
-        # одиночное сообщение (текст, фото или видео)
         if message.photo:
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
@@ -528,10 +519,15 @@ async def handle_post(message: types.Message, state: FSMContext):
         else:
             post = {"type": "text", "text": message.text}
 
-    # сохраняем весь пост в state
+    # Сохраняем пост в state
     await state.update_data(post_content=post)
-    # показываем пользователю кнопки для публикации
+
+    # **Очень важно**: снимаем старое состояние, чтобы avoid дубли
+    await States.waiting_for_post.set()
+
+    # Отправляем кнопки для публикации
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
 
 
     # отложенная публикация
