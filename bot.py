@@ -520,13 +520,14 @@ async def handle_post(message: types.Message, state: FSMContext):
             post = {"type": "text", "text": message.text}
 
     # Сохраняем пост в state
-    await state.update_data(post_content=post)
+await state.update_data(post_content=post)
 
-    # **Очень важно**: снимаем старое состояние, чтобы avoid дубли
-    await States.waiting_for_post.set()
+# Снимаем состояние, чтобы не ловить повторные сообщения
+await state.reset_state(with_data=False)
 
-    # Отправляем кнопки для публикации
-    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+# Отправляем кнопки для публикации
+await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
 
 
 
