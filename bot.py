@@ -514,7 +514,7 @@ async def handle_post(message: types.Message, state: FSMContext):
     # Проверяем, не пришла ли медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
-        await asyncio.sleep(0.5)  # собираем все сообщения группы
+        await asyncio.sleep(0.5)
         first = media_groups[uid][0]
         if first.photo:
             post = {"type": "photo", "file_id": first.photo[-1].file_id, "caption": first.caption or ""}
@@ -534,11 +534,12 @@ async def handle_post(message: types.Message, state: FSMContext):
     # Сохраняем пост в state
     await state.update_data(post_content=post)
 
-    # Переключаемся в выбор способа публикации
+    # Показываем кнопки выбора
+    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
+    # 👉 Переводим пользователя в новое состояние
     await States.waiting_for_publish_choice.set()
 
-    # Отправляем кнопки
-    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
 
 
 
