@@ -213,25 +213,34 @@ async def on_start(message: types.Message):
 # Обработчик кнопок: Создать пост
 @dp.callback_query_handler(lambda c: c.data == "create_post")
 async def cb_create_post(callback: types.CallbackQuery):
-    Bot.set_current(bot)
-    Dispatcher.set_current(dp)
-    await callback.answer()
-    user = init_user(callback.from_user.id)
-    today = datetime.now().day
-    if user.get("last_post_day") != today:
-        user["posts_today"] = 0
-        user["last_post_day"] = today
-        save_users(users_data)
-    tariff = TARIFFS[user["tariff"]]
-    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
-        # перенаправляем на смену тарифа
-        await callback.message.answer(
-            f"⚠️ Лимит публикаций исчерпан для тарифа {user['tariff'].capitalize()}. Выберите тариф:",
-            reply_markup=make_tariff_kb(user["tariff"])
-        )
-        return
-    await callback.message.answer("Отправь текст, фото или видео для публикации.", reply_markup=None)
-    await States.waiting_for_post.set()
+    try:
+        # мгновенный ответ, чтобы Telegram не выкидывал ошибку
+        await callback.answer()
+
+        Bot.set_current(bot)
+        Dispatcher.set_current(dp)
+
+        user = init_user(callback.from_user.id)
+        today = datetime.now().day
+        if user.get("last_post_day") != today:
+            user["posts_today"] = 0
+            user["last_post_day"] = today
+            save_users(users_data)
+
+        tariff = TARIFFS[user["tariff"]]
+        if user.get("posts_today", 0) >= tariff["posts_per_day"]:
+            await callback.message.answer(
+                f"⚠️ Лимит публикаций исчерпан для тарифа {user['tariff'].capitalize()}. Выберите тариф:",
+                reply_markup=make_tariff_kb(user["tariff"])
+            )
+            return
+
+        await callback.message.answer("Отправь текст, фото или видео для публикации.", reply_markup=None)
+        await States.waiting_for_post.set()
+
+    except Exception as e:
+        logger.exception("Ошибка в cb_create_post: %s", e)
+
 
 # Сменить тариф — показать варианты
 @dp.callback_query_handler(lambda c: c.data == "change_tariff")
