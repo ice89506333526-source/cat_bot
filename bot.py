@@ -114,9 +114,11 @@ init_user(ADMIN_ID)
 # ------------------ FSM ------------------
 class States(StatesGroup):
     waiting_for_post = State()
+    waiting_for_publish_choice = State()
     waiting_for_schedule_time = State()
     waiting_for_email_for_payment = State()
     waiting_for_edit_index = State()
+
 
 # ------------------ Бот ------------------
 bot = Bot(token=API_TOKEN, parse_mode=types.ParseMode.HTML)
