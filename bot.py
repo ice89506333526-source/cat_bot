@@ -525,9 +525,12 @@ async def handle_post(message: types.Message, state: FSMContext):
     # Сохраняем пост в state
     await state.update_data(post_content=post)
 
-    # Переводим в состояние выбора действия
-    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+    # Переключаемся в выбор способа публикации
     await States.waiting_for_publish_choice.set()
+
+    # Отправляем кнопки
+    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
 
 
 # Callback publish_now / schedule_post
