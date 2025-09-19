@@ -13,6 +13,7 @@ from typing import Dict, Any, List
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
+from aiogram.types import MediaGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -212,20 +213,30 @@ async def on_start(message: types.Message):
 
 # Обработчик кнопок: Создать пост
 @dp.callback_query_handler(lambda c: c.data == "create_post")
-async def cb_create_post(callback: types.CallbackQuery):
+async def cb_create_post(callback: types.CallbackQuery, state: FSMContext):
+    # быстрый ответ Telegram, чтобы не было ошибки "InvalidQueryID"
+    await callback.answer(cache_time=1)
+
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
+
     try:
-        # мгновенный ответ, чтобы Telegram не выкидывал ошибку
-        await callback.answer()
-
-        Bot.set_current(bot)
-        Dispatcher.set_current(dp)
-
         user = init_user(callback.from_user.id)
         today = datetime.now().day
         if user.get("last_post_day") != today:
             user["posts_today"] = 0
             user["last_post_day"] = today
             save_users(users_data)
+
+        # ставим состояние для ожидания поста
+        await States.waiting_for_post.set()
+
+        # просим пользователя отправить пост
+        await callback.message.answer("✍️ Отправь текст, фото или видео для публикации.")
+
+    except Exception as e:
+        logger.exception("Ошибка в cb_create_post: %s", e)
+        await callback.message.answer("⚠️ Произошла ошибка. Попробуйте ещё раз.")
 
         tariff = TARIFFS[user["tariff"]]
         if user.get("posts_today", 0) >= tariff["posts_per_day"]:
@@ -511,25 +522,36 @@ async def handle_post(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     init_user(uid)
 
+    post = None
+
     # Проверяем, не пришла ли медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
-        await asyncio.sleep(0.5)
-        first = media_groups[uid][0]
-        if first.photo:
-            post = {"type": "photo", "file_id": first.photo[-1].file_id, "caption": first.caption or ""}
-        elif first.video:
-            post = {"type": "video", "file_id": first.video.file_id, "caption": first.caption or ""}
-        else:
-            post = {"type": "text", "text": first.caption or ""}
-        media_groups[uid].clear()
+        await asyncio.sleep(0.7)  # чуть больше задержка, чтобы собрать все сообщения альбома
+
+        if media_groups[uid]:
+            album = MediaGroup()
+            for msg in media_groups[uid]:
+                if msg.photo:
+                    album.attach_photo(msg.photo[-1].file_id, caption=msg.caption or None)
+                elif msg.video:
+                    album.attach_video(msg.video.file_id, caption=msg.caption or None)
+
+            post = {"type": "album", "media": album}
+            media_groups[uid].clear()
+
     else:
+        # одиночное сообщение
         if message.photo:
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
             post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
-        else:
+        elif message.text:
             post = {"type": "text", "text": message.text}
+
+    if not post:
+        await message.answer("⚠️ Не удалось определить содержимое поста. Отправь текст, фото или видео.")
+        return
 
     # Сохраняем пост в state
     await state.update_data(post_content=post)
@@ -539,7 +561,6 @@ async def handle_post(message: types.Message, state: FSMContext):
 
     # 👉 Переводим пользователя в новое состояние
     await States.waiting_for_publish_choice.set()
-
 
 
 
