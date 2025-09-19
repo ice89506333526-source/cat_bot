@@ -188,6 +188,12 @@ def make_tariff_kb(user_tariff: str) -> types.InlineKeyboardMarkup:
 
 # ------------------ Помощники ------------------
 async def send_post_to_group(post: Dict[str, Any]) -> None:
+    """
+    Поддерживает типы: text, photo, video, album.
+    Для album ожидается post["media"] как список словарей:
+      [{"type":"photo"|"video", "file_id": "<id>", "caption": "<opt>"} ...]
+    При отправке конструируем InputMedia только здесь.
+    """
     try:
         if post["type"] == "text":
             await bot.send_message(GROUP_ID, post["text"])
@@ -199,11 +205,22 @@ async def send_post_to_group(post: Dict[str, Any]) -> None:
             await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption", ""))
 
         elif post["type"] == "album":
-            # Отправляем сразу несколько фото/видео как альбом
-            await bot.send_media_group(GROUP_ID, post["media"])
+            # Пост["media"] — список словарей (type, file_id, caption)
+            medias = []
+            for i, item in enumerate(post["media"]):
+                t = item.get("type")
+                fid = item.get("file_id")
+                cap = item.get("caption") if i == 0 else None  # caption только у первого элемента
+                if t == "photo":
+                    medias.append(types.InputMediaPhoto(media=fid, caption=cap))
+                elif t == "video":
+                    medias.append(types.InputMediaVideo(media=fid, caption=cap))
+            if medias:
+                await bot.send_media_group(GROUP_ID, medias)
 
     except Exception:
         logger.exception("Ошибка при отправке поста в группу")
+
 
 
 # ------------------ Хендлеры ------------------
@@ -532,21 +549,26 @@ async def handle_post(message: types.Message, state: FSMContext):
 
     post = None
 
-    # Проверяем, не пришла ли медиа-группа
+    # Если это медиа-группа (альбом), собираем все сообщения в media_groups[uid]
     if message.media_group_id:
         media_groups[uid].append(message)
-        await asyncio.sleep(0.7)  # чуть больше задержка, чтобы собрать все сообщения альбома
+        await asyncio.sleep(0.6)  # небольшая задержка, чтобы Telegram прислал все элементы
 
-        if media_groups[uid]:
-            album = MediaGroup()
-            for msg in media_groups[uid]:
-                if msg.photo:
-                    album.attach_photo(msg.photo[-1].file_id, caption=msg.caption or None)
-                elif msg.video:
-                    album.attach_video(msg.video.file_id, caption=msg.caption or None)
+        media_list = []
+        caption = None
+        for i, msg in enumerate(media_groups[uid]):
+            if msg.photo:
+                media_list.append({"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption if i == 0 else None})
+                if i == 0 and msg.caption:
+                    caption = msg.caption
+            elif msg.video:
+                media_list.append({"type": "video", "file_id": msg.video.file_id, "caption": msg.caption if i == 0 else None})
+                if i == 0 and msg.caption:
+                    caption = msg.caption
+        media_groups[uid].clear()
 
-            post = {"type": "album", "media": album}
-            media_groups[uid].clear()
+        if media_list:
+            post = {"type": "album", "media": media_list, "caption": caption or ""}
 
     else:
         # одиночное сообщение
@@ -554,21 +576,24 @@ async def handle_post(message: types.Message, state: FSMContext):
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
             post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
-        elif message.text:
-            post = {"type": "text", "text": message.text}
+        else:
+            text = message.text or ""
+            post = {"type": "text", "text": text}
 
     if not post:
-        await message.answer("⚠️ Не удалось определить содержимое поста. Отправь текст, фото или видео.")
+        await message.answer("Не удалось обработать сообщение. Попробуйте снова.")
         return
 
-    # Сохраняем пост в state
+    # Сохраняем пост в state (в виде простых структур — безопасно для JSON)
     await state.update_data(post_content=post)
 
     # Показываем кнопки выбора
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
 
-    # 👉 Переводим пользователя в новое состояние
+    # Переводим пользователя в состояние выбора публикации
     await States.waiting_for_publish_choice.set()
+
+
 
 
 
