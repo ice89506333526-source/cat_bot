@@ -191,12 +191,20 @@ async def send_post_to_group(post: Dict[str, Any]) -> None:
     try:
         if post["type"] == "text":
             await bot.send_message(GROUP_ID, post["text"])
+
         elif post["type"] == "photo":
-            await bot.send_photo(GROUP_ID, post["file_id"], caption=post.get("caption"))
+            await bot.send_photo(GROUP_ID, post["file_id"], caption=post.get("caption", ""))
+
         elif post["type"] == "video":
-            await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption"))
+            await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption", ""))
+
+        elif post["type"] == "album":
+            # Отправляем сразу несколько фото/видео как альбом
+            await bot.send_media_group(GROUP_ID, post["media"])
+
     except Exception:
         logger.exception("Ошибка при отправке поста в группу")
+
 
 # ------------------ Хендлеры ------------------
 
