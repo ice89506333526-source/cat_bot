@@ -188,12 +188,6 @@ def make_tariff_kb(user_tariff: str) -> types.InlineKeyboardMarkup:
 
 # ------------------ Помощники ------------------
 async def send_post_to_group(post: Dict[str, Any]) -> None:
-    """
-    Поддерживает типы: text, photo, video, album.
-    Для album ожидается post["media"] как список словарей:
-      [{"type":"photo"|"video", "file_id": "<id>", "caption": "<opt>"} ...]
-    При отправке конструируем InputMedia только здесь.
-    """
     try:
         if post["type"] == "text":
             await bot.send_message(GROUP_ID, post["text"])
@@ -205,21 +199,19 @@ async def send_post_to_group(post: Dict[str, Any]) -> None:
             await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption", ""))
 
         elif post["type"] == "album":
-            # Пост["media"] — список словарей (type, file_id, caption)
-            medias = []
+            media = []
             for i, item in enumerate(post["media"]):
-                t = item.get("type")
-                fid = item.get("file_id")
-                cap = item.get("caption") if i == 0 else None  # caption только у первого элемента
-                if t == "photo":
-                    medias.append(types.InputMediaPhoto(media=fid, caption=cap))
-                elif t == "video":
-                    medias.append(types.InputMediaVideo(media=fid, caption=cap))
-            if medias:
-                await bot.send_media_group(GROUP_ID, medias)
+                if item["type"] == "photo":
+                    media.append(types.InputMediaPhoto(item["file_id"], caption=item.get("caption") if i == 0 else None))
+                elif item["type"] == "video":
+                    media.append(types.InputMediaVideo(item["file_id"], caption=item.get("caption") if i == 0 else None))
+
+            if media:
+                await bot.send_media_group(GROUP_ID, media)
 
     except Exception:
         logger.exception("Ошибка при отправке поста в группу")
+
 
 
 
@@ -549,42 +541,49 @@ async def handle_post(message: types.Message, state: FSMContext):
 
     post = None
 
-    # Если это медиа-группа (альбом), собираем все сообщения в media_groups[uid]
+    # Проверяем, не пришла ли медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
-        await asyncio.sleep(0.6)  # небольшая задержка, чтобы Telegram прислал все элементы
+        await asyncio.sleep(0.7)  # ждём, пока Telegram пришлёт все элементы альбома
 
-        media_list = []
+        media = []
         caption = None
         for i, msg in enumerate(media_groups[uid]):
             if msg.photo:
-                media_list.append({"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption if i == 0 else None})
+                media.append({
+                    "type": "photo",
+                    "file_id": msg.photo[-1].file_id,
+                    "caption": msg.caption if i == 0 else None
+                })
                 if i == 0 and msg.caption:
                     caption = msg.caption
             elif msg.video:
-                media_list.append({"type": "video", "file_id": msg.video.file_id, "caption": msg.caption if i == 0 else None})
+                media.append({
+                    "type": "video",
+                    "file_id": msg.video.file_id,
+                    "caption": msg.caption if i == 0 else None
+                })
                 if i == 0 and msg.caption:
                     caption = msg.caption
+
+        if media:
+            post = {"type": "album", "media": media, "caption": caption or ""}
+
         media_groups[uid].clear()
 
-        if media_list:
-            post = {"type": "album", "media": media_list, "caption": caption or ""}
-
     else:
-        # одиночное сообщение
         if message.photo:
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
             post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
         else:
-            text = message.text or ""
-            post = {"type": "text", "text": text}
+            post = {"type": "text", "text": message.text}
 
     if not post:
         await message.answer("Не удалось обработать сообщение. Попробуйте снова.")
         return
 
-    # Сохраняем пост в state (в виде простых структур — безопасно для JSON)
+    # Сохраняем пост в state
     await state.update_data(post_content=post)
 
     # Показываем кнопки выбора
@@ -592,6 +591,7 @@ async def handle_post(message: types.Message, state: FSMContext):
 
     # Переводим пользователя в состояние выбора публикации
     await States.waiting_for_publish_choice.set()
+
 
 
 
