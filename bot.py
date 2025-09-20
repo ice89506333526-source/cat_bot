@@ -583,16 +583,17 @@ async def handle_post(message: types.Message, state: FSMContext):
         await message.answer("Не удалось обработать сообщение. Попробуйте снова.")
         return
 
-    # Сохраняем пост в state
-    await state.update_data(post_content=post)
+# Сохраняем пост в state
+await state.update_data(post_content=post)
 
-    # Показываем кнопки выбора
-    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+# Показываем кнопки выбора
+await message.answer(
+    "Выберите действие для публикации:",
+    reply_markup=publish_choice_kb()
+)
 
-    # Переводим пользователя в состояние выбора публикации
-    await States.waiting_for_publish_choice.set()
-
-
+# Переводим пользователя в состояние выбора публикации
+await States.waiting_for_publish_choice.set()
 
 
 
