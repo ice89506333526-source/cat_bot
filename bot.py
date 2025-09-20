@@ -555,14 +555,18 @@ async def handle_post(message: types.Message, state: FSMContext):
 
     post = None
 
-    # Проверяем, не пришла ли медиа-группа
+    # Если это альбом
     if message.media_group_id:
         media_groups[uid].append(message)
-        await asyncio.sleep(0.7)  # ждём, пока Telegram пришлёт все элементы альбома
+        await asyncio.sleep(1)  # ждём чуть дольше, чтобы собрать все элементы
+
+        # Берём все сообщения из группы
+        msgs = media_groups[uid]
+        media_groups[uid] = []  # очищаем, чтобы не дублировалось
 
         media = []
         caption = None
-        for i, msg in enumerate(media_groups[uid]):
+        for i, msg in enumerate(msgs):
             if msg.photo:
                 media.append({
                     "type": "photo",
@@ -583,31 +587,28 @@ async def handle_post(message: types.Message, state: FSMContext):
         if media:
             post = {"type": "album", "media": media, "caption": caption or ""}
 
-        media_groups[uid].clear()
-
     else:
+        # Одиночные фото/видео/текст
         if message.photo:
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
             post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
-        else:
+        elif message.text:
             post = {"type": "text", "text": message.text}
 
     if not post:
         await message.answer("Не удалось обработать сообщение. Попробуйте снова.")
         return
 
-    # Сохраняем пост в state
+    # Сохраняем пост
     await state.update_data(post_content=post)
 
-    # Показываем кнопки выбора
-    await message.answer(
-        "Выберите действие для публикации:",
-        reply_markup=publish_choice_kb()
-    )
+    # Показываем кнопки
+    await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
 
-    # Переводим пользователя в состояние выбора публикации
+    # Переводим в состояние выбора
     await States.waiting_for_publish_choice.set()
+
 
 
 
