@@ -193,18 +193,32 @@ async def send_post_to_group(post: Dict[str, Any]) -> None:
             await bot.send_message(GROUP_ID, post["text"])
 
         elif post["type"] == "photo":
-            await bot.send_photo(GROUP_ID, post["file_id"], caption=post.get("caption", ""))
+            await bot.send_photo(
+                GROUP_ID,
+                post["file_id"],
+                caption=post.get("caption")
+            )
 
         elif post["type"] == "video":
-            await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption", ""))
+            await bot.send_video(
+                GROUP_ID,
+                post["file_id"],
+                caption=post.get("caption")
+            )
 
         elif post["type"] == "album":
             media = []
             for i, item in enumerate(post["media"]):
                 if item["type"] == "photo":
-                    media.append(types.InputMediaPhoto(item["file_id"], caption=item.get("caption") if i == 0 else None))
+                    media.append(types.InputMediaPhoto(
+                        media=item["file_id"],
+                        caption=item["caption"] if i == 0 else None
+                    ))
                 elif item["type"] == "video":
-                    media.append(types.InputMediaVideo(item["file_id"], caption=item.get("caption") if i == 0 else None))
+                    media.append(types.InputMediaVideo(
+                        media=item["file_id"],
+                        caption=item["caption"] if i == 0 else None
+                    ))
 
             if media:
                 await bot.send_media_group(GROUP_ID, media)
