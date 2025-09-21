@@ -29,7 +29,7 @@ media_groups = defaultdict(list)
 
 
 # ------------------ Константы (вставлены ваши данные) ------------------
-API_TOKEN = "8423035573:AAHo53sPuZJXbGXLhW5-EThbdXM5GrCULDQ"
+API_TOKEN = "8423035573:AAFDI-PrjjAqif07eQIW4G-XNF0ktGNtIXs"
 BOT_USERNAME = "cat777_cash_bot"
 GROUP_ID = -1002522022019
 ADMIN_ID = 827299190
