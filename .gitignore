@@ -1,5 +1,16 @@
-venv/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+
+# Virtual environment
+venv/
+
+# Local config / secrets
+*.env
+токен.txt
 users_data.json
-.env
+secure_users.diff
