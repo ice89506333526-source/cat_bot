@@ -13,7 +13,6 @@ from typing import Dict, Any, List
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
-from aiogram.types import MediaGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -28,15 +27,17 @@ media_groups = defaultdict(list)
 
 
 
-# ------------------ Константы (вставлены ваши данные) ------------------
-API_TOKEN = "8423035573:AAFDI-PrjjAqif07eQIW4G-XNF0ktGNtIXs"
-BOT_USERNAME = "cat777_cash_bot"
-GROUP_ID = -1002522022019
-ADMIN_ID = 827299190
+# ------------------ Константы (из переменных окружения) ------------------
+API_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "cat777_cash_bot")
+GROUP_ID = int(os.environ.get("GROUP_ID", -1002522022019))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 827299190))
 
 # ---------------- Webhook settings ----------------
-# Путь webhook — содержит токен, чтобы усложнить доступ сторонним
-WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+# Убираем токен из пути, оставляем случайный "salt"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "mysecret123")
+WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
+
 
 # Render предоставляет публичный hostname в переменной окружения RENDER_EXTERNAL_HOSTNAME.
 # Соберём публичный URL webhook
@@ -49,10 +50,11 @@ else:
     # fallback для локальной разработки (Telegram требует HTTPS — для локали нужен ngrok)
     WEBHOOK_URL = f"http://localhost:{PORT}{WEBHOOK_PATH}"
 
-# Provider token для Telegram Payments
-PROVIDER_TOKEN = "390540012:LIVE:77400"
-YOOKASSA_SHOP_ID = "1151636"
-YOOKASSA_SECRET_KEY = "live_9WZWrOx1vsciG0JzhQqb8fP_JdPwvLJ3YSJBbc1acBE"
+# Provider token и ЮKassa берём из переменных окружения
+PROVIDER_TOKEN = os.environ.get("PROVIDER_TOKEN")
+YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID")
+YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY")
+
 
 USERS_FILE = "users_data.json"
 
@@ -191,43 +193,12 @@ async def send_post_to_group(post: Dict[str, Any]) -> None:
     try:
         if post["type"] == "text":
             await bot.send_message(GROUP_ID, post["text"])
-
         elif post["type"] == "photo":
-            await bot.send_photo(
-                GROUP_ID,
-                post["file_id"],
-                caption=post.get("caption")
-            )
-
+            await bot.send_photo(GROUP_ID, post["file_id"], caption=post.get("caption"))
         elif post["type"] == "video":
-            await bot.send_video(
-                GROUP_ID,
-                post["file_id"],
-                caption=post.get("caption")
-            )
-
-        elif post["type"] == "album":
-            media = []
-            for i, item in enumerate(post["media"]):
-                if item["type"] == "photo":
-                    media.append(types.InputMediaPhoto(
-                        media=item["file_id"],
-                        caption=item["caption"] if i == 0 else None
-                    ))
-                elif item["type"] == "video":
-                    media.append(types.InputMediaVideo(
-                        media=item["file_id"],
-                        caption=item["caption"] if i == 0 else None
-                    ))
-
-            if media:
-                await bot.send_media_group(GROUP_ID, media)
-
+            await bot.send_video(GROUP_ID, post["file_id"], caption=post.get("caption"))
     except Exception:
         logger.exception("Ошибка при отправке поста в группу")
-
-
-
 
 # ------------------ Хендлеры ------------------
 
@@ -244,30 +215,20 @@ async def on_start(message: types.Message):
 
 # Обработчик кнопок: Создать пост
 @dp.callback_query_handler(lambda c: c.data == "create_post")
-async def cb_create_post(callback: types.CallbackQuery, state: FSMContext):
-    # быстрый ответ Telegram, чтобы не было ошибки "InvalidQueryID"
-    await callback.answer(cache_time=1)
-
-    Bot.set_current(bot)
-    Dispatcher.set_current(dp)
-
+async def cb_create_post(callback: types.CallbackQuery):
     try:
+        # мгновенный ответ, чтобы Telegram не выкидывал ошибку
+        await callback.answer()
+
+        Bot.set_current(bot)
+        Dispatcher.set_current(dp)
+
         user = init_user(callback.from_user.id)
         today = datetime.now().day
         if user.get("last_post_day") != today:
             user["posts_today"] = 0
             user["last_post_day"] = today
             save_users(users_data)
-
-        # ставим состояние для ожидания поста
-        await States.waiting_for_post.set()
-
-        # просим пользователя отправить пост
-        await callback.message.answer("✍️ Отправь текст, фото или видео для публикации.")
-
-    except Exception as e:
-        logger.exception("Ошибка в cb_create_post: %s", e)
-        await callback.message.answer("⚠️ Произошла ошибка. Попробуйте ещё раз.")
 
         tariff = TARIFFS[user["tariff"]]
         if user.get("posts_today", 0) >= tariff["posts_per_day"]:
@@ -553,63 +514,34 @@ async def handle_post(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     init_user(uid)
 
-    post = None
-
-    # Если это альбом
+    # Проверяем, не пришла ли медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
-        await asyncio.sleep(1)  # ждём чуть дольше, чтобы собрать все элементы
-
-        # Берём все сообщения из группы
-        msgs = media_groups[uid]
-        media_groups[uid] = []  # очищаем, чтобы не дублировалось
-
-        media = []
-        caption = None
-        for i, msg in enumerate(msgs):
-            if msg.photo:
-                media.append({
-                    "type": "photo",
-                    "file_id": msg.photo[-1].file_id,
-                    "caption": msg.caption if i == 0 else None
-                })
-                if i == 0 and msg.caption:
-                    caption = msg.caption
-            elif msg.video:
-                media.append({
-                    "type": "video",
-                    "file_id": msg.video.file_id,
-                    "caption": msg.caption if i == 0 else None
-                })
-                if i == 0 and msg.caption:
-                    caption = msg.caption
-
-        if media:
-            post = {"type": "album", "media": media, "caption": caption or ""}
-
+        await asyncio.sleep(0.5)
+        first = media_groups[uid][0]
+        if first.photo:
+            post = {"type": "photo", "file_id": first.photo[-1].file_id, "caption": first.caption or ""}
+        elif first.video:
+            post = {"type": "video", "file_id": first.video.file_id, "caption": first.caption or ""}
+        else:
+            post = {"type": "text", "text": first.caption or ""}
+        media_groups[uid].clear()
     else:
-        # Одиночные фото/видео/текст
         if message.photo:
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
             post = {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
-        elif message.text:
+        else:
             post = {"type": "text", "text": message.text}
 
-    if not post:
-        await message.answer("Не удалось обработать сообщение. Попробуйте снова.")
-        return
-
-    # Сохраняем пост
+    # Сохраняем пост в state
     await state.update_data(post_content=post)
 
-    # Показываем кнопки
+    # Показываем кнопки выбора
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
 
-    # Переводим в состояние выбора
+    # 👉 Переводим пользователя в новое состояние
     await States.waiting_for_publish_choice.set()
-
-
 
 
 
@@ -719,34 +651,32 @@ async def handle_webhook(request: web.Request):
 
 # ---------------- Main entry ----------------
 async def main():
-    # Убедимся, что admin присутствует
+    # Инициализация администратора
     init_user(ADMIN_ID)
 
-    # Настраиваем webhook
-    await bot.delete_webhook()
-    await bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook set: {WEBHOOK_URL}")
-
-    # Создаём aiohttp-приложение
-    app = web.Application()
-    app.router.add_post(WEBHOOK_PATH, handle_webhook)
-    app.router.add_get("/", lambda request: web.Response(text="Bot is running!"))
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-    logger.info(f"Server started at http://0.0.0.0:{PORT}")
-
-    # Запустим воркер для отложенных постов
+    # Запускаем воркер для отложенных постов
     asyncio.create_task(scheduled_post_worker())
 
-    # Бесконечный цикл (держим alive)
-    while True:
-        await asyncio.sleep(3600)
+    # Проверяем, есть ли публичный RENDER_HOST
+    RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    if RENDER_HOST:
+        # Если на проде (Render), используем webhook
+        await bot.delete_webhook()
+        await bot.set_webhook(WEBHOOK_URL)
+        logger.info(f"Webhook set: {WEBHOOK_URL}")
 
+        # Создаём aiohttp-приложение для webhook
+        app = web.Application()
+        app.router.add_post(WEBHOOK_PATH, handle_webhook)
+        app.router.add_get("/", lambda request: web.Response(text="Bot is running!"))
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        logger.info(f"Server started at http://0.0.0.0:{PORT}")
+    else:
+        # Локальная разработка — polling
+        logger.info("Запуск бота в режиме polling (локальная разработка)...")
+        await dp.start_polling(bot)
 

@@ -1,0 +1,153 @@
+--- a/bot.py
++++ b/bot.py
+@@
+ API_TOKEN = "8423035573:AAFDI-PrjjAqif07eQIW4G-XNF0ktGNtIXs"
+ BOT_USERNAME = "cat777_cash_bot"
+ GROUP_ID = -1002522022019
+ ADMIN_ID = 827299190
++
++# Секрет для webhook (должен быть задан в Render → Environment)
++WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+@@
+ USERS_FILE = "users_data.json"
++
++# --- Safety / atomic save for users_data.json ------------------------------
++_users_file_lock = asyncio.Lock()
++
++def save_users_sync(data: Dict[str, Any]) -> None:
++    """Синхронная атомарная запись."""
++    tmp = USERS_FILE + ".tmp"
++    try:
++        with open(tmp, "w", encoding="utf-8") as f:
++            json.dump(data, f, ensure_ascii=False, indent=2)
++        os.replace(tmp, USERS_FILE)
++    except Exception:
++        logger.exception("Ошибка при синхронном сохранении users_data.json")
++
++async def save_users_async(data: Dict[str, Any]) -> None:
++    """Асинхронная запись с использованием asyncio.Lock."""
++    tmp = USERS_FILE + ".tmp"
++    async with _users_file_lock:
++        loop = asyncio.get_running_loop()
++        def _write():
++            with open(tmp, "w", encoding="utf-8") as f:
++                json.dump(data, f, ensure_ascii=False, indent=2)
++            os.replace(tmp, USERS_FILE)
++        try:
++            await loop.run_in_executor(None, _write)
++        except Exception:
++            logger.exception("Ошибка при асинхронном сохранении users_data.json")
++
++def redact(s: str) -> str:
++    """Редактирование токенов/секретов в логах."""
++    if not s:
++        return ""
++    s = str(s)
++    if len(s) <= 16:
++        return s
++    return s[:6] + "..." + s[-6:]
+@@
+ def init_user(user_id: int) -> Dict[str, Any]:
+     key = str(user_id)
+     if key not in users_data:
+         users_data[key] = {
+             "tariff": "free",
+             "posts_today": 0,
+             "last_post_day": None,
+             "history": [],
+             "pending_tariff": None,
+             "email": None,
+         }
+-        save_users(users_data)
++        save_users_sync(users_data)
+ 
+     # Админ всегда premium
+     if key == str(ADMIN_ID):
+         users_data[key]["tariff"] = "premium"
+-        save_users(users_data)
++        save_users_sync(users_data)
+ 
+     return users_data[key]
+@@
+ async def cb_create_post(callback: types.CallbackQuery):
+     try:
+-        await callback.answer()
++        await callback.answer(cache_time=1)
+ 
+         Bot.set_current(bot)
+         Dispatcher.set_current(dp)
+ 
+         user = init_user(callback.from_user.id)
+         today = datetime.now().day
+         if user.get("last_post_day") != today:
+             user["posts_today"] = 0
+             user["last_post_day"] = today
+-            save_users(users_data)
++            await save_users_async(users_data)
+@@
+ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
+     Bot.set_current(bot)
+     Dispatcher.set_current(dp)
+ 
+-    await callback.answer()
++    await callback.answer(cache_time=1)
+     data = await state.get_data()
+     post = data.get("post_content")
+@@
+-        save_users(users_data)
++        await save_users_async(users_data)
+@@
+ async def schedule_time_handler(message: types.Message, state: FSMContext):
+     text = message.text.strip()
+     try:
+         publish_time = datetime.strptime(text, "%Y-%m-%d %H:%M")
+     except ValueError:
+         await message.answer("Неверный формат времени. Попробуйте снова (пример: 2025-09-05 14:30).")
+         return
+@@
+-    save_users(users_data)
++    await save_users_async(users_data)
+@@
+ async def scheduled_post_worker():
+     while True:
+         try:
+             now = datetime.now()
+             for uid, user in list(users_data.items()):
+                 posts = user.get("scheduled_posts", [])
+                 remaining = []
+                 for post in posts:
+                     if post["time"] <= now:
+                         await send_post_to_group(post)
+                         user["history"].append({"time": now.isoformat(), "post": post})
+                     else:
+                         remaining.append(post)
+                 user["scheduled_posts"] = remaining
+-            save_users(users_data)
++            await save_users_async(users_data)
+         except Exception:
+             logger.exception("Ошибка в scheduled_post_worker")
+         await asyncio.sleep(30)
+@@
+ async def main():
+-    await bot.set_webhook(WEBHOOK_URL)
+-    logger.info("Webhook установлен: %s", WEBHOOK_URL)
++    await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET)
++    logger.info("Webhook установлен: %s", redact(WEBHOOK_URL))
+@@
+ async def handle_webhook(request: web.Request):
+-    try:
+-        data = await request.json()
++    try:
++        # проверка секрета
++        if WEBHOOK_SECRET:
++            header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
++            if header != WEBHOOK_SECRET:
++                logger.warning("Webhook: неверный secret header (%s)", redact(header))
++                return web.Response(status=401, text="invalid secret")
++
++        data = await request.json()
+         update = types.Update(**data)
+         Bot.set_current(bot)
+         Dispatcher.set_current(dp)
+         await dp.process_update(update)
+         return web.Response(text="ok")

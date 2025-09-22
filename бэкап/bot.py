@@ -19,6 +19,8 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 from aiogram.types import ContentType
 from collections import defaultdict
+from aiohttp import web
+
 
 # Для сбора медиа, чтобы объединять в один пост
 media_groups = defaultdict(list)
@@ -28,16 +30,31 @@ media_groups = defaultdict(list)
 # ------------------ Константы (вставлены ваши данные) ------------------
 API_TOKEN = "8423035573:AAHo53sPuZJXbGXLhW5-EThbdXM5GrCULDQ"
 BOT_USERNAME = "cat777_cash_bot"
-GROUP_ID = -1002522022019  # -1002522022019
+GROUP_ID = -1002522022019
 ADMIN_ID = 827299190
-# Provider token для Telegram Payments (токен магазина, который выдаёт BotFather при подключении ЮKassa)
-PROVIDER_TOKEN = "390540012:LIVE:77400"
 
-# Доп. (для справки) Yookassa shop и secret (не используются напрямую для send_invoice)
+# ---------------- Webhook settings ----------------
+# Путь webhook — содержит токен, чтобы усложнить доступ сторонним
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+
+# Render предоставляет публичный hostname в переменной окружения RENDER_EXTERNAL_HOSTNAME.
+# Соберём публичный URL webhook
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")  # на Render вроде cat-bot-4.onrender.com
+PORT = int(os.environ.get("PORT", 10000))
+
+if RENDER_HOST:
+    WEBHOOK_URL = f"https://{RENDER_HOST}{WEBHOOK_PATH}"
+else:
+    # fallback для локальной разработки (Telegram требует HTTPS — для локали нужен ngrok)
+    WEBHOOK_URL = f"http://localhost:{PORT}{WEBHOOK_PATH}"
+
+# Provider token для Telegram Payments
+PROVIDER_TOKEN = "390540012:LIVE:77400"
 YOOKASSA_SHOP_ID = "1151636"
 YOOKASSA_SECRET_KEY = "live_9WZWrOx1vsciG0JzhQqb8fP_JdPwvLJ3YSJBbc1acBE"
 
 USERS_FILE = "users_data.json"
+
 
 # ------------------ Тарифы ------------------
 TARIFFS = {
@@ -97,9 +114,11 @@ init_user(ADMIN_ID)
 # ------------------ FSM ------------------
 class States(StatesGroup):
     waiting_for_post = State()
+    waiting_for_publish_choice = State()
     waiting_for_schedule_time = State()
     waiting_for_email_for_payment = State()
     waiting_for_edit_index = State()
+
 
 # ------------------ Бот ------------------
 bot = Bot(token=API_TOKEN, parse_mode=types.ParseMode.HTML)
@@ -194,23 +213,34 @@ async def on_start(message: types.Message):
 # Обработчик кнопок: Создать пост
 @dp.callback_query_handler(lambda c: c.data == "create_post")
 async def cb_create_post(callback: types.CallbackQuery):
-    await callback.answer()
-    user = init_user(callback.from_user.id)
-    today = datetime.now().day
-    if user.get("last_post_day") != today:
-        user["posts_today"] = 0
-        user["last_post_day"] = today
-        save_users(users_data)
-    tariff = TARIFFS[user["tariff"]]
-    if user.get("posts_today", 0) >= tariff["posts_per_day"]:
-        # перенаправляем на смену тарифа
-        await callback.message.answer(
-            f"⚠️ Лимит публикаций исчерпан для тарифа {user['tariff'].capitalize()}. Выберите тариф:",
-            reply_markup=make_tariff_kb(user["tariff"])
-        )
-        return
-    await callback.message.answer("Отправь текст, фото или видео для публикации.", reply_markup=None)
-    await States.waiting_for_post.set()
+    try:
+        # мгновенный ответ, чтобы Telegram не выкидывал ошибку
+        await callback.answer()
+
+        Bot.set_current(bot)
+        Dispatcher.set_current(dp)
+
+        user = init_user(callback.from_user.id)
+        today = datetime.now().day
+        if user.get("last_post_day") != today:
+            user["posts_today"] = 0
+            user["last_post_day"] = today
+            save_users(users_data)
+
+        tariff = TARIFFS[user["tariff"]]
+        if user.get("posts_today", 0) >= tariff["posts_per_day"]:
+            await callback.message.answer(
+                f"⚠️ Лимит публикаций исчерпан для тарифа {user['tariff'].capitalize()}. Выберите тариф:",
+                reply_markup=make_tariff_kb(user["tariff"])
+            )
+            return
+
+        await callback.message.answer("Отправь текст, фото или видео для публикации.", reply_markup=None)
+        await States.waiting_for_post.set()
+
+    except Exception as e:
+        logger.exception("Ошибка в cb_create_post: %s", e)
+
 
 # Сменить тариф — показать варианты
 @dp.callback_query_handler(lambda c: c.data == "change_tariff")
@@ -244,6 +274,8 @@ async def cb_pay(callback: types.CallbackQuery):
 # Промежуточный: запрос email -> отправка invoice
 @dp.message_handler(state=States.waiting_for_email_for_payment, content_types=types.ContentTypes.TEXT)
 async def email_for_payment_handler(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     email = message.text.strip()
     # простая валидация
     if "@" not in email or "." not in email:
@@ -409,6 +441,8 @@ async def cb_repost(callback: types.CallbackQuery):
 # Редактирование поста (простой поток: пользователь отправляет новый контент; заменяем запись в истории)
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("edit:"))
 async def cb_edit(callback: types.CallbackQuery):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     await callback.answer()
     _, idx_str = callback.data.split(":", 1)
     try:
@@ -431,6 +465,8 @@ async def cb_edit(callback: types.CallbackQuery):
 
 @dp.message_handler(state=States.waiting_for_edit_index, content_types=types.ContentTypes.ANY)
 async def handle_edit_submission(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     key = str(message.from_user.id)
     init_user(message.from_user.id)
     idx = users_data[key].get("_editing_index")
@@ -466,17 +502,19 @@ async def handle_edit_submission(message: types.Message, state: FSMContext):
 # Получение поста после нажатия 'Создать пост'
 from aiogram.types import ContentType
 
+# Получение поста после нажатия 'Создать пост'
 @dp.message_handler(state=States.waiting_for_post, content_types=ContentType.ANY)
 async def handle_post(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
+
     uid = message.from_user.id
     init_user(uid)
 
-    # Если медиа-группа (альбом)
+    # Проверяем, не пришла ли медиа-группа
     if message.media_group_id:
         media_groups[uid].append(message)
-        # Ждём немного, чтобы собрать все сообщения группы
         await asyncio.sleep(0.5)
-        # Берём первый пост группы для создания единого объекта
         first = media_groups[uid][0]
         if first.photo:
             post = {"type": "photo", "file_id": first.photo[-1].file_id, "caption": first.caption or ""}
@@ -484,10 +522,8 @@ async def handle_post(message: types.Message, state: FSMContext):
             post = {"type": "video", "file_id": first.video.file_id, "caption": first.caption or ""}
         else:
             post = {"type": "text", "text": first.caption or ""}
-        # очищаем хранилище для этого пользователя
         media_groups[uid].clear()
     else:
-        # одиночное сообщение (текст, фото или видео)
         if message.photo:
             post = {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
         elif message.video:
@@ -495,18 +531,28 @@ async def handle_post(message: types.Message, state: FSMContext):
         else:
             post = {"type": "text", "text": message.text}
 
-    # сохраняем весь пост в state
+    # Сохраняем пост в state
     await state.update_data(post_content=post)
-    # показываем пользователю кнопки для публикации
+
+    # Показываем кнопки выбора
     await message.answer("Выберите действие для публикации:", reply_markup=publish_choice_kb())
+
+    # 👉 Переводим пользователя в новое состояние
+    await States.waiting_for_publish_choice.set()
+
+
 
 
 # Callback publish_now / schedule_post
-@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state="*")
+@dp.callback_query_handler(lambda c: c.data in ("publish_now", "schedule_post"), state=States.waiting_for_publish_choice)
 async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
+
     await callback.answer()
     data = await state.get_data()
     post = data.get("post_content")
+
     if not post:
         await callback.message.answer("Нет содержимого для публикации. Начните заново.")
         await state.finish()
@@ -521,7 +567,10 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
 
     tariff = TARIFFS[user["tariff"]]
     if user.get("posts_today", 0) >= tariff["posts_per_day"]:
-        await callback.message.answer("⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.", reply_markup=make_tariff_kb(user["tariff"]))
+        await callback.message.answer(
+            "⚠️ Лимит публикаций исчерпан. Пожалуйста, смените тариф.",
+            reply_markup=make_tariff_kb(user["tariff"])
+        )
         await state.finish()
         return
 
@@ -529,29 +578,27 @@ async def cb_publish_choice(callback: types.CallbackQuery, state: FSMContext):
         await send_post_to_group(post)
         user["posts_today"] = user.get("posts_today", 0) + 1
         user.setdefault("history", []).append(post)
+
         # trim history до последних 5
         if len(user["history"]) > 5:
             user["history"] = user["history"][-5:]
+
         save_users(users_data)
         await callback.message.answer("✅ Пост опубликован!", reply_markup=main_menu_kb())
         await state.finish()
-        return
+    else:
+        # если выбрали "schedule_post"
+        await callback.message.answer("Введите дату и время публикации (в формате YYYY-MM-DD HH:MM):")
+        await States.waiting_for_schedule_time.set()
 
-    # отложенная публикация
-    if not tariff["delay"]:
-        await callback.message.answer("⏰ Отложенные публикации недоступны на вашем тарифе.", reply_markup=main_menu_kb())
-        await state.finish()
-        return
 
-    await callback.message.answer(
-        "Введите время публикации в формате ГГГГ-ММ-ДД ЧЧ:ММ (например: 2025-09-05 14:30):",
-        reply_markup=None
-    )
-    await States.waiting_for_schedule_time.set()
+
 
 
 @dp.message_handler(state=States.waiting_for_schedule_time, content_types=ContentType.TEXT)
 async def schedule_time_handler(message: types.Message, state: FSMContext):
+    Bot.set_current(bot)
+    Dispatcher.set_current(dp)
     text = message.text.strip()
     try:
         publish_time = datetime.strptime(text, "%Y-%m-%d %H:%M")
@@ -575,17 +622,60 @@ async def schedule_time_handler(message: types.Message, state: FSMContext):
 async def on_startup(dp):
     logger.info("Запуск бота...")
     # запустим воркер для отложенных постов
-    asyncio.create_task(scheduled_post_worker())
 
-async def on_shutdown(dp):
-    logger.info("Выключение бота, закрываю сессию...")
+# ---------------- Webhook handler ----------------
+async def handle_webhook(request: web.Request):
     try:
-        await bot.session.close()
+        data = await request.json()
     except Exception:
-        pass
+        return web.Response(status=400)
 
-if __name__ == "__main__":
+    update = types.Update(**data)
+
+    # Устанавливаем текущий бот для Aiogram
+    Bot.set_current(bot)
+
+    try:
+        await dp.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.exception("Ошибка при обработке update: %s", e)
+        return web.Response(status=500, text=f"Internal Error: {str(e)}")
+
+
+
+
+
+# ---------------- Main entry ----------------
+async def main():
     # Убедимся, что admin присутствует
     init_user(ADMIN_ID)
-    # стартуем
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
+
+    # Настраиваем webhook
+    await bot.delete_webhook()
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set: {WEBHOOK_URL}")
+
+    # Создаём aiohttp-приложение
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.router.add_get("/", lambda request: web.Response(text="Bot is running!"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info(f"Server started at http://0.0.0.0:{PORT}")
+
+    # Запустим воркер для отложенных постов
+    asyncio.create_task(scheduled_post_worker())
+
+    # Бесконечный цикл (держим alive)
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
